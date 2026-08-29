@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment settings (contains private tokens)
+.env
+
+# Logs
+*.log
+bot_stdout.log
+bot_stderr.log
+
+# Caches & temporary files
+.cache/
+tg_media_cache/
+.DS_Store
