@@ -16,17 +16,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 AVAILABLE_MODELS: List[dict] = [
     # Gemini Series
-    {"id": "Gemini 3.7 Flash", "name": "Gemini 3.7 Flash", "desc": "快速敏捷，綜合能力強 (預設)"},
-    {"id": "Gemini 3.7 Flash (High)", "name": "Gemini 3.7 Flash (High)", "desc": "高思考預算，深度推理"},
-    {"id": "Gemini 3.6 Flash", "name": "Gemini 3.6 Flash", "desc": "極速響應，日常對話"},
-    {"id": "Gemini 3.5 Pro", "name": "Gemini 3.5 Pro", "desc": "高智慧程式碼與複雜分析"},
-    {"id": "Gemini 3.1 Pro", "name": "Gemini 3.1 Pro", "desc": "穩定長文本分析"},
-    {"id": "Gemini 2.5 Pro", "name": "Gemini 2.5 Pro", "desc": "經典 Pro 模型"},
-    {"id": "Gemini 2.5 Flash", "name": "Gemini 2.5 Flash", "desc": "經典 Flash 模型"},
-    # Claude Series
+    {"id": "Gemini 3.7 Flash (High)", "name": "Gemini 3.7 Flash (High)", "desc": "高思考預算，深度推理 (預設)"},
+    {"id": "Gemini 3.7 Flash (Medium)", "name": "Gemini 3.7 Flash (Med)", "desc": "平衡思考預算"},
+    {"id": "Gemini 3.7 Flash (Low)", "name": "Gemini 3.7 Flash (Low)", "desc": "低思考預算，極速回覆"},
+    {"id": "Gemini 3.6 Flash (High)", "name": "Gemini 3.6 Flash (High)", "desc": "3.6 Flash 高思考"},
+    {"id": "Gemini 3.5 Flash (High)", "name": "Gemini 3.5 Flash (High)", "desc": "3.5 Flash 高思考"},
+    {"id": "Gemini 3.1 Pro (High)", "name": "Gemini 3.1 Pro (High)", "desc": "高智慧程式碼與長文本分析"},
+    # Claude & Other Series
+    {"id": "Claude Sonnet 4.6 (Thinking)", "name": "Claude Sonnet 4.6 (Thinking)", "desc": "強大程式能力與思考鏈"},
     {"id": "Claude Opus 4.6 (Thinking)", "name": "Claude Opus 4.6 (Thinking)", "desc": "最強架構設計與極限推理"},
-    {"id": "Claude Sonnet 4 (Thinking)", "name": "Claude Sonnet 4 (Thinking)", "desc": "強大程式能力與思考鏈"},
-    {"id": "Claude 3.7 Sonnet", "name": "Claude 3.7 Sonnet", "desc": "均衡高性能模型"},
+    {"id": "GPT-OSS 120B (Medium)", "name": "GPT-OSS 120B (Med)", "desc": "開放權重大型開源模型"},
 ]
 
 PAGE_SIZE = 5

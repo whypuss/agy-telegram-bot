@@ -182,6 +182,13 @@ async def run_agent_turn(
     _active_processes[user_id] = proc
     stderr_lines: list[str] = []
 
+    # Close stdin since prompt is passed via CLI flag
+    if proc.stdin:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+
     async def _stream_stderr():
         while True:
             line_bytes = await proc.stderr.readline()
@@ -197,19 +204,27 @@ async def run_agent_turn(
                 except Exception:
                     pass
 
+    async def _read_stdout() -> bytes:
+        return await proc.stdout.read()
+
     stderr_task = asyncio.create_task(_stream_stderr())
+    stdout_task = asyncio.create_task(_read_stdout())
 
     try:
-        stdout_bytes, _ = await asyncio.wait_for(
-            proc.communicate(input=prompt.encode("utf-8")),
+        await asyncio.wait_for(
+            asyncio.gather(stderr_task, stdout_task, proc.wait()),
             timeout=AGY_TIMEOUT + 15,
         )
+        stdout_bytes = stdout_task.result()
     except asyncio.CancelledError:
         logger.info("Task cancelled for user %s", user_id)
         await cancel_user_task(user_id)
         raise
     finally:
-        stderr_task.cancel()
+        if not stderr_task.done():
+            stderr_task.cancel()
+        if not stdout_task.done():
+            stdout_task.cancel()
         _active_processes.pop(user_id, None)
 
     response_text = stdout_bytes.decode("utf-8", errors="replace").strip()
