@@ -19,6 +19,7 @@ from telegram import (
     Update,
     InlineKeyboardMarkup,
     LinkPreviewOptions,
+    BotCommand,
 )
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.ext import (
@@ -65,6 +66,7 @@ from agent_runner import (
     set_user_model,
     get_user_conversation,
     reset_user_conversation,
+    get_user_usage_summary,
     is_user_task_running,
     cancel_user_task,
 )
@@ -73,6 +75,7 @@ from ui_components import (
     build_model_keyboard,
     build_cancel_keyboard,
     format_status_card,
+    format_usage_card,
     format_help_card,
 )
 
@@ -289,41 +292,55 @@ async def process_agent_turn(
 
     # Run agent execution
     try:
-        reply_text, new_conv_id = await run_agent_turn(
+        reply_text, new_conv_id, turn_usage = await run_agent_turn(
             prompt=prompt,
             user_id=uid,
             on_progress=on_progress,
         )
     except asyncio.CancelledError:
         reply_text = "🛑 任務已由使用者中止。"
+        turn_usage = None
     except asyncio.TimeoutError:
         reply_text = f"⏰ Agent 執行超時（{AGY_TIMEOUT} 秒）。\n請簡化需求或使用 /reset 重置會話。"
+        turn_usage = None
     except Exception as e:
         logger.exception("Error executing turn for user %s: %s", uid, e)
         reply_text = f"❌ 執行發生未預期錯誤：\n```\n{e}\n```"
+        turn_usage = None
     finally:
         typing_active = False
         typing_task.cancel()
 
-    # Update status message to Completed
+    # Update status message to Completed with token metrics
     elapsed_total = format_elapsed(int(time.time() - start_time))
+    token_str = ""
+    if turn_usage and turn_usage.get("total_tokens"):
+        tokens = turn_usage["total_tokens"]
+        token_str = f" · {tokens:,} tokens"
+
     try:
         await status_msg.edit_text(
-            text=f"✅ *任務完成* \\(耗時 {elapsed_total}\\)",
-            parse_mode=ParseMode.MARKDOWN_V2,
+            text=f"✅ 任務完成 (耗時 {elapsed_total}{token_str})",
             reply_markup=None,
         )
     except Exception:
-        try:
-            await status_msg.edit_text(f"✅ 任務完成 (耗時 {elapsed_total})", reply_markup=None)
-        except Exception:
-            pass
+        pass
+
+    # Append usage footer directly to the reply text if available
+    final_reply_text = reply_text
+    if turn_usage and turn_usage.get("total_tokens"):
+        tokens = turn_usage["total_tokens"]
+        in_tok = turn_usage.get("input_tokens", 0)
+        out_tok = turn_usage.get("output_tokens", 0)
+        dur = turn_usage.get("duration_seconds") or (time.time() - start_time)
+        usage_footer = f"\n\n---\n⏱️ `{dur:.1f}s` · 📊 `{tokens:,}` tokens (📥 `{in_tok:,}` / 📤 `{out_tok:,}`)"
+        final_reply_text = f"{reply_text}{usage_footer}"
 
     # Send response text
     await send_formatted_reply(
         update=update,
         context=context,
-        text=reply_text,
+        text=final_reply_text,
         reply_to_message_id=original_message_id,
         thread_id=thread_id,
     )
@@ -630,26 +647,35 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = user.id
 
     if not is_authorized(uid):
-        await update.message.reply_text(
-            f"⛔ 你沒有權限使用此 Bot。\n你的 User ID: `{uid}`",
-            parse_mode=ParseMode.MARKDOWN,
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text=f"⛔ 你沒有權限使用此 Bot。\n你的 User ID: `{uid}`",
+            reply_to_message_id=update.message.message_id,
         )
         return
 
     current_model = get_user_model(uid)
-    await update.message.reply_text(
-        f"👋 你好 *{user.first_name}*！\n\n"
-        f"我是你的 *Antigravity AI Agent* 遠端助手。\n"
+    text = (
+        f"👋 你好 **{user.first_name}**！\n\n"
+        f"我是你的 **Antigravity AI Agent** 遠端助手。\n"
         f"直接傳送文字、圖片、語音或程式碼文件，我將為你處理。\n\n"
-        f"🧠 *目前模型：* `{current_model}`\n"
-        f"🆔 *你的 User ID：* `{uid}`\n\n"
-        f"📌 *常用指令：*\n"
-        f"• `/model` — 互動式切換 AI 模型\n"
-        f"• `/reset` — 重置會話記憶（開新對話）\n"
-        f"• `/status` — 查看目前運作狀態\n"
-        f"• `/cancel` — 中止正在運行的任務\n"
-        f"• `/help` — 顯示完整說明",
-        parse_mode=ParseMode.MARKDOWN,
+        f"🧠 **目前模型：** `{current_model}`\n"
+        f"🆔 **你的 User ID：** `{uid}`\n\n"
+        f"📌 **常用指令：**\n"
+        f"• `/usage` — 📊 查看 Token 用量與資源消耗統計\n"
+        f"• `/model` — 🧠 互動式切換 AI 模型\n"
+        f"• `/reset` — 🔄 重置會話記憶（開新對話）\n"
+        f"• `/status` — 📈 查看目前運作狀態\n"
+        f"• `/cancel` — 🛑 中止正在運行的任務\n"
+        f"• `/clear` — 🧹 清理暫存多模態檔案\n"
+        f"• `/help` — 📖 顯示完整說明"
+    )
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=text,
+        reply_to_message_id=update.message.message_id,
     )
 
 
@@ -665,19 +691,20 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if args:
         new_model = " ".join(args).strip()
         set_user_model(uid, new_model)
-        await update.message.reply_text(
-            f"✅ 模型已切換為：`{new_model}`\n會話已自動重置為全新對話。",
-            parse_mode=ParseMode.MARKDOWN,
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text=f"✅ **模型已切換為：** `{new_model}`\n會話已自動重置為全新對話。",
+            reply_to_message_id=update.message.message_id,
         )
         return
 
     # Show interactive picker
     kb, page, total = build_model_keyboard(current_model, page=0)
     await update.message.reply_text(
-        f"🧠 *AI 模型選擇器*\n\n"
-        f"目前使用模型: `{current_model}`\n"
+        f"🧠 AI 模型選擇器\n\n"
+        f"目前使用模型: {current_model}\n"
         f"點擊下方按鈕可立即切換模型（切換後將自動開啟新會話）：",
-        parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb,
     )
 
@@ -689,9 +716,37 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     reset_user_conversation(uid)
-    await update.message.reply_text(
-        "🔄 *對話記憶已重置*\n下次傳送訊息將會開啟全新的 Agent Session。",
-        parse_mode=ParseMode.MARKDOWN,
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text="🔄 **對話記憶已重置**\n下次傳送訊息將會開啟全新的 Agent Session。",
+        reply_to_message_id=update.message.message_id,
+    )
+
+
+async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /usage command to display detailed token statistics."""
+    user = update.effective_user
+    uid = user.id
+    if not is_authorized(uid):
+        return
+
+    current_model = get_user_model(uid)
+    conv_id = get_user_conversation(uid)
+    usage_summary = get_user_usage_summary(uid)
+
+    card = format_usage_card(
+        user_id=uid,
+        user_name=user.first_name,
+        current_model=current_model,
+        conversation_id=conv_id,
+        usage_summary=usage_summary,
+    )
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=card,
+        reply_to_message_id=update.message.message_id,
     )
 
 
@@ -706,6 +761,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     conv_id = get_user_conversation(uid)
     is_running = is_user_task_running(uid)
     uptime_str = get_uptime_string()
+    usage_summary = get_user_usage_summary(uid)
 
     card = format_status_card(
         user_id=uid,
@@ -716,8 +772,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         is_running=is_running,
         workspace_dir=WORKSPACE_DIR,
         proxy_url=PROXY_URL or None,
+        usage_stats=usage_summary,
     )
-    await update.message.reply_text(card, parse_mode=ParseMode.MARKDOWN_V2)
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=card,
+        reply_to_message_id=update.message.message_id,
+    )
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -728,9 +790,19 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     cancelled = await cancel_user_task(uid)
     if cancelled:
-        await update.message.reply_text("🛑 正在運行的 Agent 任務已成功中止。")
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="🛑 **正在運行的 Agent 任務已成功中止。**",
+            reply_to_message_id=update.message.message_id,
+        )
     else:
-        await update.message.reply_text("ℹ️ 目前沒有正在執行的任務。")
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="ℹ️ 目前沒有正在執行的任務。",
+            reply_to_message_id=update.message.message_id,
+        )
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -740,7 +812,12 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     count = cleanup_cache(max_age_seconds=0)  # clean all
-    await update.message.reply_text(f"🧹 已清理 {count} 個暫存多模態檔案。")
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=f"🧹 已清理 {count} 個暫存多模態檔案。",
+        reply_to_message_id=update.message.message_id,
+    )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -751,7 +828,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     current_model = get_user_model(uid)
     card = format_help_card(current_model, AGY_TIMEOUT)
-    await update.message.reply_text(card, parse_mode=ParseMode.MARKDOWN)
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=card,
+        reply_to_message_id=update.message.message_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -772,9 +854,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         model_name = data.split(":", 1)[1]
         set_user_model(uid, model_name)
         await query.edit_message_text(
-            f"✅ *模型已成功切換為：* `{model_name}`\n"
+            f"✅ 模型已成功切換為：{model_name}\n"
             f"對話記憶已重置，隨時傳送訊息即可開始新對話！",
-            parse_mode=ParseMode.MARKDOWN,
         )
 
     elif data.startswith("page_model:"):
@@ -814,6 +895,29 @@ async def drain_polling_connections(app: Application) -> None:
         logger.debug("Failed draining polling pool: %s", e)
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log uncaught errors gracefully."""
+    logger.error("Exception while handling an update: %s", context.error, exc_info=context.error)
+
+
+async def post_init(app: Application) -> None:
+    """Register slash commands with Telegram to enable auto-completion."""
+    commands = [
+        BotCommand("usage", "📊 查看 Token 用量與資源消耗統計"),
+        BotCommand("model", "🧠 切換 AI 模型"),
+        BotCommand("status", "📈 查看系統狀態與當前會話"),
+        BotCommand("reset", "🔄 重置會話記憶（開啟新對話）"),
+        BotCommand("cancel", "🛑 中止正在運行的任務"),
+        BotCommand("clear", "🧹 清理暫存多模態檔案"),
+        BotCommand("help", "📖 顯示說明手冊"),
+    ]
+    try:
+        await app.bot.set_my_commands(commands)
+        logger.info("Telegram bot commands registered successfully")
+    except Exception as e:
+        logger.warning("Failed to register bot commands: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Main Application Builder
 # ---------------------------------------------------------------------------
@@ -827,7 +931,7 @@ def main() -> None:
     if not ALLOWED_USER_IDS:
         logger.warning("⚠️ ALLOWED_USER_IDS 未設定 — 所有人皆能使用此 Bot！")
 
-    builder = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN)
+    builder = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init)
 
     # Proxy Support
     if PROXY_URL:
@@ -836,8 +940,12 @@ def main() -> None:
 
     app = builder.build()
 
+    # Global error handler
+    app.add_error_handler(error_handler)
+
     # Commands
     app.add_handler(CommandHandler(["start"], cmd_start))
+    app.add_handler(CommandHandler(["usage"], cmd_usage))
     app.add_handler(CommandHandler(["model", "models"], cmd_model))
     app.add_handler(CommandHandler(["reset", "new"], cmd_reset))
     app.add_handler(CommandHandler(["status"], cmd_status))

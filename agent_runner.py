@@ -9,6 +9,7 @@ Features:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -35,6 +36,15 @@ user_conversations: Dict[int, str] = {}
 # User ID -> Selected Model
 user_models: Dict[int, str] = {}
 
+# User ID -> Active Session Usage dict (cumulative for active conversation)
+user_session_usage: Dict[int, dict] = {}
+
+# User ID -> Last Turn Usage dict (delta for the latest single turn)
+user_last_turn_usage: Dict[int, dict] = {}
+
+# User ID -> Lifetime Usage dict (total across all sessions since bot startup)
+user_lifetime_usage: Dict[int, dict] = {}
+
 
 def get_user_model(user_id: int) -> str:
     """Get the current model for a user, or default."""
@@ -53,8 +63,22 @@ def get_user_conversation(user_id: int) -> Optional[str]:
 
 
 def reset_user_conversation(user_id: int) -> None:
-    """Reset the conversation context for a user."""
+    """Reset the conversation context and session usage for a user."""
     user_conversations.pop(user_id, None)
+    user_session_usage.pop(user_id, None)
+    user_last_turn_usage.pop(user_id, None)
+
+
+def get_user_usage_summary(user_id: int) -> dict:
+    """Get usage summary including current session, last turn, and lifetime statistics."""
+    return {
+        "session": user_session_usage.get(user_id),
+        "last_turn": user_last_turn_usage.get(user_id),
+        "lifetime": user_lifetime_usage.get(
+            user_id,
+            {"turns": 0, "total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0},
+        ),
+    }
 
 
 def is_user_task_running(user_id: int) -> bool:
@@ -129,7 +153,7 @@ async def run_agent_turn(
     prompt: str,
     user_id: int,
     on_progress: Optional[Callable[[str], Coroutine]] = None,
-) -> Tuple[str, Optional[str]]:
+) -> Tuple[str, Optional[str], Optional[dict]]:
     """
     Execute a turn of the Antigravity Agent for a user.
     
@@ -139,7 +163,7 @@ async def run_agent_turn(
         on_progress: Async callback invoked with progress indicator strings
         
     Returns:
-        (response_text, new_conversation_id)
+        (response_text, new_conversation_id, turn_usage)
     """
     model = get_user_model(user_id)
     conv_id = get_user_conversation(user_id)
@@ -147,7 +171,7 @@ async def run_agent_turn(
     cmd = [AGY_PATH]
     cmd.extend(["--print-timeout", f"{AGY_TIMEOUT}s"])
     cmd.extend(["--dangerously-skip-permissions"])
-    cmd.extend(["--output-format", "text"])
+    cmd.extend(["--output-format", "json"])
 
     if model:
         cmd.extend(["--model", model])
@@ -227,17 +251,85 @@ async def run_agent_turn(
             stdout_task.cancel()
         _active_processes.pop(user_id, None)
 
-    response_text = stdout_bytes.decode("utf-8", errors="replace").strip()
+    stdout_str = stdout_bytes.decode("utf-8", errors="replace").strip()
     stderr_text = "\n".join(stderr_lines)
 
-    # Extract Conversation UUID from stderr logs
+    response_text = ""
     new_conv_id = None
-    for line in stderr_lines:
-        if "conversation" in line.lower() or "session" in line.lower():
-            match = re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', line)
-            if match:
-                new_conv_id = match.group(0)
-                break
+    turn_usage: Optional[dict] = None
+
+    # Try parsing JSON output from agy
+    try:
+        parsed_json = json.loads(stdout_str)
+        if isinstance(parsed_json, dict):
+            response_text = parsed_json.get("response", "").strip()
+            new_conv_id = parsed_json.get("conversation_id")
+            num_turns = parsed_json.get("num_turns", 1)
+            duration = parsed_json.get("duration_seconds", 0.0)
+            raw_usage = parsed_json.get("usage")
+
+            if isinstance(raw_usage, dict):
+                input_tokens = raw_usage.get("input_tokens", 0)
+                output_tokens = raw_usage.get("output_tokens", 0)
+                thinking_tokens = raw_usage.get("thinking_tokens", 0)
+                cache_read_tokens = raw_usage.get("cache_read_tokens", 0)
+                total_tokens = raw_usage.get("total_tokens", 0)
+
+                # Compute delta for this single turn against previous session total
+                prev_session = user_session_usage.get(user_id, {})
+                prev_total = prev_session.get("total_tokens", 0)
+                prev_input = prev_session.get("input_tokens", 0)
+                prev_output = prev_session.get("output_tokens", 0)
+                prev_thinking = prev_session.get("thinking_tokens", 0)
+
+                turn_input = max(0, input_tokens - prev_input) if prev_total > 0 else input_tokens
+                turn_output = max(0, output_tokens - prev_output) if prev_total > 0 else output_tokens
+                turn_thinking = max(0, thinking_tokens - prev_thinking) if prev_total > 0 else thinking_tokens
+                turn_total = max(0, total_tokens - prev_total) if prev_total > 0 else total_tokens
+
+                turn_usage = {
+                    "input_tokens": turn_input,
+                    "output_tokens": turn_output,
+                    "thinking_tokens": turn_thinking,
+                    "cache_read_tokens": cache_read_tokens,
+                    "total_tokens": turn_total,
+                    "duration_seconds": duration,
+                }
+                user_last_turn_usage[user_id] = turn_usage
+
+                # Update cumulative session usage
+                user_session_usage[user_id] = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "thinking_tokens": thinking_tokens,
+                    "cache_read_tokens": cache_read_tokens,
+                    "total_tokens": total_tokens,
+                    "num_turns": num_turns,
+                }
+
+                # Update lifetime usage
+                lifetime = user_lifetime_usage.setdefault(
+                    user_id,
+                    {"turns": 0, "total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0},
+                )
+                lifetime["turns"] += 1
+                lifetime["total_tokens"] += turn_total
+                lifetime["input_tokens"] += turn_input
+                lifetime["output_tokens"] += turn_output
+                lifetime["thinking_tokens"] += turn_thinking
+
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # Fallback to plain text output if JSON decoding fails
+        response_text = stdout_str
+
+    # Extract Conversation UUID from stderr logs if not present from JSON
+    if not new_conv_id:
+        for line in stderr_lines:
+            if "conversation" in line.lower() or "session" in line.lower():
+                match = re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', line)
+                if match:
+                    new_conv_id = match.group(0)
+                    break
 
     if new_conv_id:
         user_conversations[user_id] = new_conv_id
@@ -250,4 +342,4 @@ async def run_agent_turn(
         else:
             response_text = "（Agent 回覆為空）"
 
-    return response_text, new_conv_id
+    return response_text, new_conv_id, turn_usage
