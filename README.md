@@ -1,8 +1,11 @@
 # Antigravity Telegram Bot 🤖
 
+**繁體中文** | [English](README_EN.md)
+
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot%20API-blue.svg)](https://core.telegram.org/bots/api)
 [![Google Antigravity](https://img.shields.io/badge/Antigravity-Agent%202.0-orange.svg)](https://antigravity.google)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 透過 Telegram 在手機、電腦或任何裝置上遠端調度你的 **Google Antigravity Agent & Gemini**。  
 參考 [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent) 的 Telegram 平台架構進行深度重構，具備工業級的網路容錯、Markdown 格式化引擎、多模態多媒體處理、智慧訊息批次防抖與互動式選單。
