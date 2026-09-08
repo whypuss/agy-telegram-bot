@@ -31,7 +31,7 @@
 - 📤 **生成檔案主動回傳**：若 Agent 在回答中生成圖片或匯出文件，Bot 會自動擷取本機檔案並作為 Telegram 原生附件發送給使用者。
 
 ### 4. 🎛️ 互動式 UI 與即時進度更新
-- **點擊式模型切換器**：輸入 `/model` 即彈出帶分頁的 Inline Keyboard 按鈕，支援 Gemini 3.7 Flash、Gemini 3.5 Pro、Claude Opus 4.6 (Thinking) 等一鍵切換。
+- **點擊式模型切換器**：輸入 `/model` 即彈出帶分頁的 Inline Keyboard 按鈕，支援 Gemini 3.8 Flash、Gemini 3.7 Flash、Claude Opus 4.6 (Thinking) 等一鍵切換。
 - **即時執行狀態與進度指示**：執行時持續維持 Typing 指示器，並動態解析 Agent 工具調用（🔧 工具執行、🔍 搜尋、📄 檔案讀寫、🧠 思考），附帶「🛑 中止執行 (Cancel)」按鈕。
 
 ### 5. 🌐 網路容錯與 Proxy 支援

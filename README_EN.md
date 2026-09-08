@@ -31,7 +31,7 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
 - 📤 **Outbound Media Delivery**: Detects generated plots, images, or exported files from agent responses and sends them natively as Telegram photos or documents.
 
 ### 4. 🎛️ Interactive UI & Real-Time Progress
-- **Paginated `/model` Selector**: Clickable inline keyboard buttons to switch instantly between Gemini 3.7 Flash (High), Gemini 3.5 Pro, Claude Opus 4.6 (Thinking), and more.
+- **Paginated `/model` Selector**: Clickable inline keyboard buttons to switch instantly between Gemini 3.8 Flash, Gemini 3.7 Flash (High), Claude Opus 4.6 (Thinking), and more.
 - **Live Progress Updates**: Continuous typing heartbeat with dynamic status editing reflecting tools (🔧 Tool execution, 🔍 Search, 📄 File read/write, 🧠 Thinking), accompanied by an instant **🛑 Cancel** button.
 
 ### 5. 🌐 Network Resilience & Proxy Support
@@ -111,9 +111,10 @@ python bot.py
 | Command | Description |
 |---|---|
 | `/start` | Welcome screen, view User ID and quick start guide |
+| `/usage` | 📊 View session, turn, and total token usage statistics |
 | `/model` | Open interactive button menu to switch AI models with pagination |
 | `/reset` or `/new` | Reset conversation memory and start a fresh session |
-| `/status` | View agent health, active model, session ID, workspace, and uptime |
+| `/status` | View agent health, token usage, active model, session ID, workspace, and uptime |
 | `/cancel` or `/stop` | Abort a long-running agent turn immediately |
 | `/clear` | Purge local temporary media cache files |
 | `/help` | Display comprehensive command and feature guide |

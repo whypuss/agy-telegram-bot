@@ -15,10 +15,15 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 # ---------------------------------------------------------------------------
 
 AVAILABLE_MODELS: List[dict] = [
-    # Gemini Series
-    {"id": "Gemini 3.7 Flash (High)", "name": "Gemini 3.7 Flash (High)", "desc": "高思考預算，深度推理 (預設)"},
+    # Gemini 3.8 Series
+    {"id": "Gemini 3.8 Flash (High)", "name": "Gemini 3.8 Flash (High)", "desc": "高思考預算，深度推理"},
+    {"id": "Gemini 3.8 Flash (Medium)", "name": "Gemini 3.8 Flash (Med)", "desc": "平衡思考預算 (預設)"},
+    {"id": "Gemini 3.8 Flash (Low)", "name": "Gemini 3.8 Flash (Low)", "desc": "低思考預算，極速回覆"},
+    # Gemini 3.7 Series
+    {"id": "Gemini 3.7 Flash (High)", "name": "Gemini 3.7 Flash (High)", "desc": "高思考預算，深度推理"},
     {"id": "Gemini 3.7 Flash (Medium)", "name": "Gemini 3.7 Flash (Med)", "desc": "平衡思考預算"},
     {"id": "Gemini 3.7 Flash (Low)", "name": "Gemini 3.7 Flash (Low)", "desc": "低思考預算，極速回覆"},
+    # Gemini 3.6 / 3.5 / 3.1 Series
     {"id": "Gemini 3.6 Flash (High)", "name": "Gemini 3.6 Flash (High)", "desc": "3.6 Flash 高思考"},
     {"id": "Gemini 3.5 Flash (High)", "name": "Gemini 3.5 Flash (High)", "desc": "3.5 Flash 高思考"},
     {"id": "Gemini 3.1 Pro (High)", "name": "Gemini 3.1 Pro (High)", "desc": "高智慧程式碼與長文本分析"},
@@ -28,7 +33,72 @@ AVAILABLE_MODELS: List[dict] = [
     {"id": "GPT-OSS 120B (Medium)", "name": "GPT-OSS 120B (Med)", "desc": "開放權重大型開源模型"},
 ]
 
-PAGE_SIZE = 5
+PAGE_SIZE = 6
+
+
+def resolve_model_alias(model_query: str) -> str:
+    """
+    Resolve user input to canonical model ID if possible.
+    Supports partial matches and aliases like '3.8', '3.8 flash', 'sonnet', etc.
+    """
+    query = model_query.strip()
+    if not query:
+        return ""
+
+    # Direct case-insensitive match against id or name
+    for m in AVAILABLE_MODELS:
+        if m["id"].lower() == query.lower() or m["name"].lower() == query.lower():
+            return m["id"]
+
+    q_clean = query.lower().replace("-", " ").replace("_", " ")
+
+    # Quick aliases for model versions
+    if "3.8" in q_clean:
+        if "high" in q_clean:
+            return "Gemini 3.8 Flash (High)"
+        elif "low" in q_clean:
+            return "Gemini 3.8 Flash (Low)"
+        else:
+            return "Gemini 3.8 Flash (Medium)"
+
+    if "3.7" in q_clean:
+        if "med" in q_clean:
+            return "Gemini 3.7 Flash (Medium)"
+        elif "low" in q_clean:
+            return "Gemini 3.7 Flash (Low)"
+        else:
+            return "Gemini 3.7 Flash (High)"
+
+    if "3.6" in q_clean:
+        if "med" in q_clean:
+            return "Gemini 3.6 Flash (Medium)"
+        elif "low" in q_clean:
+            return "Gemini 3.6 Flash (Low)"
+        else:
+            return "Gemini 3.6 Flash (High)"
+
+    if "3.5" in q_clean:
+        return "Gemini 3.5 Flash (High)"
+
+    if "3.1" in q_clean or ("pro" in q_clean and "gemini" in q_clean):
+        return "Gemini 3.1 Pro (High)"
+
+    if "opus" in q_clean:
+        return "Claude Opus 4.6 (Thinking)"
+
+    if "sonnet" in q_clean:
+        return "Claude Sonnet 4.6 (Thinking)"
+
+    if "oss" in q_clean or "gpt" in q_clean:
+        return "GPT-OSS 120B (Medium)"
+
+    # Substring match in id or name
+    for m in AVAILABLE_MODELS:
+        if q_clean in m["id"].lower() or q_clean in m["name"].lower():
+            return m["id"]
+
+    # Fallback to verbatim query
+    return query
 
 
 def build_model_keyboard(current_model: str, page: int = 0) -> Tuple[InlineKeyboardMarkup, int, int]:
@@ -216,6 +286,7 @@ def format_help_card(current_model: str, timeout_seconds: int) -> str:
         "🎯 **常用指令：**\n"
         "• `/usage` — 📊 查看 Token 用量與資源消耗統計\n"
         "• `/model` — 🧠 點擊按鈕互動式切換 AI 模型\n"
+        "• `/compact` — 📦 壓縮當前上下文（瘦身並保留關鍵記憶）\n"
         "• `/reset` 或 `/new` — 🔄 開啟全新對話會話\n"
         "• `/status` — 📈 查看目前 Agent 狀態與會話資訊\n"
         "• `/cancel` — 🛑 中止正在執行的耗時任務\n"
@@ -228,3 +299,4 @@ def format_help_card(current_model: str, timeout_seconds: int) -> str:
         f"⚙️ **目前預設模型：** `{current_model}`\n"
         f"⏳ **單次執行超時：** {timeout_seconds} 秒"
     )
+

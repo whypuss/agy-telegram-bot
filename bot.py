@@ -62,6 +62,7 @@ from media_handler import (
 )
 from agent_runner import (
     run_agent_turn,
+    compact_user_conversation,
     get_user_model,
     set_user_model,
     get_user_conversation,
@@ -77,6 +78,7 @@ from ui_components import (
     format_status_card,
     format_usage_card,
     format_help_card,
+    resolve_model_alias,
 )
 
 # ---------------------------------------------------------------------------
@@ -259,19 +261,27 @@ async def process_agent_turn(
 
     # Progress line callback
     async def on_progress(indicator: str):
-        progress_items.append(indicator)
-        while len(progress_items) > 3:
+        # In-place replacement: if previous item was active and new indicator completes it, update in-place
+        if progress_items and progress_items[-1].startswith("▶ ") and indicator.startswith("✓ "):
+            progress_items[-1] = indicator
+        elif progress_items and progress_items[-1].startswith("▶ ") and indicator.startswith("▶ "):
+            progress_items[-1] = indicator
+        else:
+            progress_items.append(indicator)
+
+        while len(progress_items) > 8:
             progress_items.pop(0)
 
         now = time.time()
-        # Rate limit status edits to once every 2.5 seconds
-        if now - last_status_update[0] >= 2.5:
+        # Rate limit status edits to once every 1.5 seconds
+        if now - last_status_update[0] >= 1.5:
             last_status_update[0] = now
             elapsed = format_elapsed(int(now - start_time))
             progress_block = "\n".join(progress_items)
             msg_text = (
                 f"⏳ *Agent 處理中\\.\\.\\.* \\({elapsed}\\)\n"
                 f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
+                f"📋 *執行過程：*\n"
                 f"{format_markdown_v2(progress_block)}"
             )
             try:
@@ -284,7 +294,7 @@ async def process_agent_turn(
                 # Fallback to plain text on Markdown edit error
                 try:
                     await status_msg.edit_text(
-                        text=f"⏳ Agent 處理中... ({elapsed})\n📌 模型: {current_model}\n\n{progress_block}",
+                        text=f"⏳ Agent 處理中... ({elapsed})\n📌 模型: {current_model}\n\n📋 執行過程：\n{progress_block}",
                         reply_markup=build_cancel_keyboard(),
                     )
                 except Exception:
@@ -311,20 +321,52 @@ async def process_agent_turn(
         typing_active = False
         typing_task.cancel()
 
-    # Update status message to Completed with token metrics
+    # Update status message to Completed with token metrics & preserved process trace
     elapsed_total = format_elapsed(int(time.time() - start_time))
     token_str = ""
     if turn_usage and turn_usage.get("total_tokens"):
         tokens = turn_usage["total_tokens"]
         token_str = f" · {tokens:,} tokens"
 
+    final_items = []
+    for it in progress_items:
+        if it.startswith("▶ "):
+            final_items.append(it.replace("▶ ", "✓ "))
+        else:
+            final_items.append(it)
+
+    if final_items:
+        completed_block = "\n".join(final_items)
+        final_status_text = (
+            f"✅ *任務完成* \\(耗時 {elapsed_total}{format_markdown_v2(token_str)}\\)\n"
+            f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
+            f"📋 *執行過程：*\n"
+            f"{format_markdown_v2(completed_block)}"
+        )
+        plain_final_text = (
+            f"✅ 任務完成 (耗時 {elapsed_total}{token_str})\n"
+            f"📌 模型: {current_model}\n\n"
+            f"📋 執行過程：\n"
+            f"{completed_block}"
+        )
+    else:
+        final_status_text = f"✅ *任務完成* \\(耗時 {elapsed_total}{format_markdown_v2(token_str)}\\)"
+        plain_final_text = f"✅ 任務完成 (耗時 {elapsed_total}{token_str})"
+
     try:
         await status_msg.edit_text(
-            text=f"✅ 任務完成 (耗時 {elapsed_total}{token_str})",
+            text=final_status_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=None,
         )
     except Exception:
-        pass
+        try:
+            await status_msg.edit_text(
+                text=plain_final_text,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
 
     # Append usage footer directly to the reply text if available
     final_reply_text = reply_text
@@ -332,8 +374,18 @@ async def process_agent_turn(
         tokens = turn_usage["total_tokens"]
         in_tok = turn_usage.get("input_tokens", 0)
         out_tok = turn_usage.get("output_tokens", 0)
-        dur = turn_usage.get("duration_seconds") or (time.time() - start_time)
+        dur = turn_usage.get("duration_seconds")
+        # Ensure single turn duration is displayed rather than lifetime
+        if not dur or dur > 3600:
+            dur = max(0.1, time.time() - start_time)
         usage_footer = f"\n\n---\n⏱️ `{dur:.1f}s` · 📊 `{tokens:,}` tokens (📥 `{in_tok:,}` / 📤 `{out_tok:,}`)"
+        
+        # High token warning
+        user_usage = get_user_usage_summary(uid)
+        session_tok = ((user_usage or {}).get("session") or {}).get("total_tokens", 0)
+        if session_tok > 180000:
+            usage_footer += f"\n💡 *提示: 當前會話累積達 `{session_tok:,}` tokens，建議執行 /compact 壓縮上下文以維持最佳反應速度。*"
+
         final_reply_text = f"{reply_text}{usage_footer}"
 
     # Send response text
@@ -665,6 +717,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"📌 **常用指令：**\n"
         f"• `/usage` — 📊 查看 Token 用量與資源消耗統計\n"
         f"• `/model` — 🧠 互動式切換 AI 模型\n"
+        f"• `/compact` — 📦 壓縮上下文（瘦身並保留關鍵記憶）\n"
         f"• `/reset` — 🔄 重置會話記憶（開新對話）\n"
         f"• `/status` — 📈 查看目前運作狀態\n"
         f"• `/cancel` — 🛑 中止正在運行的任務\n"
@@ -689,7 +742,8 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current_model = get_user_model(uid)
 
     if args:
-        new_model = " ".join(args).strip()
+        raw_model = " ".join(args).strip()
+        new_model = resolve_model_alias(raw_model)
         set_user_model(uid, new_model)
         await send_formatted_reply(
             update=update,
@@ -720,6 +774,69 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update=update,
         context=context,
         text="🔄 **對話記憶已重置**\n下次傳送訊息將會開啟全新的 Agent Session。",
+        reply_to_message_id=update.message.message_id,
+    )
+
+
+async def cmd_compact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /compact and /summarize commands to compress session history."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    if is_user_task_running(uid):
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="⚠️ 目前有任務正在運行中，請稍候或先發送 /cancel 中止任務後再進行壓縮。",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    status_msg = await update.message.reply_text("📦 正在啟動上下文壓縮 (Context Compression)...")
+
+    async def on_progress(text: str):
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
+
+    start_time = time.time()
+    success, result_text, old_tok, new_tok = await compact_user_conversation(
+        user_id=uid,
+        on_progress=on_progress,
+    )
+    elapsed = int(time.time() - start_time)
+
+    if not success:
+        try:
+            await status_msg.edit_text(f"❌ 壓縮失敗：{result_text}")
+        except Exception:
+            pass
+        return
+
+    saved_pct = ((old_tok - new_tok) / max(old_tok, 1)) * 100 if old_tok > 0 else 0
+    card = (
+        f"✨ **會話上下文壓縮成功！**\n\n"
+        f"📊 **Token 瘦身統計：**\n"
+        f"• 壓縮前：`{old_tok:,}` tokens\n"
+        f"• 壓縮後：`{new_tok:,}` tokens\n"
+        f"• 空間釋放：`{saved_pct:.1f}%` (耗時 {elapsed}s)\n\n"
+        f"📝 **提煉之核心記憶摘要：**\n\n"
+        f"{result_text}\n\n"
+        f"---\n"
+        f"💡 *新會話已成功就緒，隨時傳送訊息繼續工作！*"
+    )
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=card,
         reply_to_message_id=update.message.message_id,
     )
 
@@ -905,6 +1022,7 @@ async def post_init(app: Application) -> None:
     commands = [
         BotCommand("usage", "📊 查看 Token 用量與資源消耗統計"),
         BotCommand("model", "🧠 切換 AI 模型"),
+        BotCommand("compact", "📦 壓縮當前會話上下文（瘦身並保留關鍵記憶）"),
         BotCommand("status", "📈 查看系統狀態與當前會話"),
         BotCommand("reset", "🔄 重置會話記憶（開啟新對話）"),
         BotCommand("cancel", "🛑 中止正在運行的任務"),
@@ -947,6 +1065,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["start"], cmd_start))
     app.add_handler(CommandHandler(["usage"], cmd_usage))
     app.add_handler(CommandHandler(["model", "models"], cmd_model))
+    app.add_handler(CommandHandler(["compact", "summarize"], cmd_compact))
     app.add_handler(CommandHandler(["reset", "new"], cmd_reset))
     app.add_handler(CommandHandler(["status"], cmd_status))
     app.add_handler(CommandHandler(["cancel", "stop"], cmd_cancel))
