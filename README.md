@@ -34,7 +34,13 @@
 - **點擊式模型切換器**：輸入 `/model` 即彈出帶分頁的 Inline Keyboard 按鈕，支援 Gemini 3.8 Flash、Gemini 3.7 Flash、Claude Opus 4.6 (Thinking) 等一鍵切換。
 - **即時執行狀態與進度指示**：執行時持續維持 Typing 指示器，並動態解析 Agent 工具調用（🔧 工具執行、🔍 搜尋、📄 檔案讀寫、🧠 思考），附帶「🛑 中止執行 (Cancel)」按鈕。
 
-### 5. 🌐 網路容錯與 Proxy 支援
+### 5. 🧠 本機雙軌持久記憶庫 (Hermes Agent 架構)
+- **雙軌本地文字庫**：採用與 Hermes Agent 相容架構，本機維護 `USER.md`（個人風格、溝通習慣、指令原則）與 `MEMORY.md`（伺服器 IP、帳密、部署端點、避坑經驗），以 `§` 分段。
+- **斷線與崩潰防丟 (Crash-Resilient State)**：每次輪次執行時會話 ID、模型與 Token 統計均原子寫入磁碟，即使 Telegram 掉線或進程重啟，上下文 **100% 無縫承接不丟失**。
+- **持續監聽與運行內容檢測 (Continual Memory Extractor)**：自動監聽 Telegram 對話關鍵偏好與 Agent 執行產出的系統端點/配置，即時落盤沉澱。
+- **靜態快照注入 (Frozen Snapshot Pattern)**：對話啟動時自動注入記憶快照，不破壞 LLM Prefix Caching，節省 Token 並極速回應。
+
+### 6. 🌐 網路容錯與 Proxy 支援
 - 支援 HTTP / HTTPS / SOCKS5 代理。
 - 具備連線池重設與指數退避重試機制，在電腦睡眠喚醒、WiFi 切換時自動平滑重連。
 
@@ -46,6 +52,8 @@
 tg-antigravity-bot/
 ├── bot.py             # 核心應用程式入口、Telegram Update 路由與批次調度
 ├── config.py          # 環境變數載入、設定解析與權限校驗
+├── memory_manager.py  # 本機持久記憶雙軌庫 (USER.md/MEMORY.md)、持續監聽與快照注入
+├── session_store.py   # 會話與進程抗掉線持久化狀態儲存庫 (JSON 磁碟原子寫入)
 ├── formatter.py       # Telegram MarkdownV2 轉換、GFM 表格重構與代碼感知分段
 ├── agent_runner.py    # agy CLI 子進程管理、stderr 即時解析與任務中止機制
 ├── media_handler.py   # 照片、語音、檔案下載快取與本機生成媒體偵測
@@ -110,6 +118,8 @@ python bot.py
 | `/start` | 歡迎頁面、查看目前 User ID 與快速導覽 |
 | `/usage` | 📊 查看當前會話、最近單輪與全域累計的 Token 用量統計 |
 | `/model` | 開啟互動式選單切換 AI 模型（支援點擊切換與分頁） |
+| `/memory` 或 `/mem` | 🧠 查看、搜尋與管理本機持久記憶 (`USER.md` / `MEMORY.md`) |
+| `/compact` | 📦 壓縮當前會話上下文（提煉決策並瘦身） |
 | `/reset` 或 `/new` | 重置當前對話記憶，開啟全新 Session |
 | `/status` | 查看目前 Agent 運作狀態、Token 用量、會話 ID、工作目錄與上線時間 |
 | `/cancel` 或 `/stop` | 中止目前正在執行的長時間任務 |

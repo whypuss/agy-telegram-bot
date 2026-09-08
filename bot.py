@@ -953,6 +953,83 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /memory command to view, search, and manage persistent memory."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    from memory_manager import read_entries, add_entry, remove_entry, search_memories, MEMORY_DIR
+
+    args = context.args or []
+    if args:
+        subcmd = args[0].lower()
+        if subcmd == "search" and len(args) > 1:
+            query = " ".join(args[1:])
+            results = search_memories(query)
+            if not results:
+                await send_formatted_reply(update, context, f"🔍 未找到包含「{query}」的記憶。")
+                return
+            lines = [f"🔍 *記憶搜尋結果（關鍵字：`{query}`）：*\n"]
+            for idx, r in enumerate(results, 1):
+                lines.append(f"*{idx}. [{r['store']}]*\n{r['content']}\n")
+            await send_formatted_reply(update, context, "\n".join(lines))
+            return
+
+        elif subcmd == "add" and len(args) > 1:
+            target = "memory"
+            text_idx = 1
+            if args[1].lower() in ("user", "pref", "preference"):
+                target = "user"
+                text_idx = 2
+            content = " ".join(args[text_idx:]).strip()
+            if not content:
+                await send_formatted_reply(update, context, "⚠️ 請輸入欲儲存的記憶內容。")
+                return
+            ok, msg = add_entry(target, content)
+            await send_formatted_reply(update, context, msg)
+            return
+
+        elif subcmd in ("remove", "rm", "del", "delete") and len(args) > 1:
+            target = "memory"
+            text_idx = 1
+            if args[1].lower() in ("user", "pref"):
+                target = "user"
+                text_idx = 2
+            query = " ".join(args[text_idx:]).strip()
+            ok, msg = remove_entry(target, query)
+            await send_formatted_reply(update, context, msg)
+            return
+
+    # Default overview card
+    user_entries = read_entries("user")
+    sys_entries = read_entries("memory")
+
+    overview = (
+        "🧠 **本機持久化記憶管理 (Hermes Architecture)**\n"
+        f"📂 儲存路徑：`{MEMORY_DIR}`\n\n"
+        f"👤 **用戶偏好與規則 (USER.md)**：共 `{len(user_entries)}` 條\n"
+        f"🖥️ **系統事實與環境配置 (MEMORY.md)**：共 `{len(sys_entries)}` 條\n\n"
+        "💡 *提示：本機記憶永久保存，即使 Bot 重啟或掉線也不會丟失。每輪會話啟動時自動作為背景快照注入。*\n"
+        "• 搜尋記憶：`/memory search <關鍵字>`\n"
+        "• 添加記憶：`/memory add [user] <內容>`\n"
+        "• 刪除記憶：`/memory remove [user] <關鍵字>`"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👤 查看 USER.md", callback_data="view_mem:user"),
+            InlineKeyboardButton("🖥️ 查看 MEMORY.md", callback_data="view_mem:sys"),
+        ],
+        [InlineKeyboardButton("❌ 關閉", callback_data="view_mem:close")]
+    ])
+
+    await update.message.reply_text(
+        text=overview,
+        reply_markup=kb,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Callback Query Handler (Interactive Buttons)
 # ---------------------------------------------------------------------------
@@ -991,6 +1068,60 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await query.answer("任務已結束或未在運行中", show_alert=True)
 
+    elif data.startswith("view_mem:"):
+        target = data.split(":", 1)[1]
+        if target == "close":
+            await query.message.delete()
+            return
+
+        from memory_manager import read_entries
+        if target == "user":
+            entries = read_entries("user")
+            title = "👤 **用戶偏好與規則 (USER.md)**"
+        else:
+            entries = read_entries("memory")
+            title = "🖥️ **系統事實與環境配置 (MEMORY.md)**"
+
+        if not entries:
+            text = f"{title}\n\n目前尚無記錄。"
+        else:
+            lines = [f"{title}\n"]
+            for idx, e in enumerate(entries, 1):
+                lines.append(f"**{idx}.** {e}\n")
+            text = "\n".join(lines)
+
+        if len(text) > 3800:
+            text = text[:3700] + "\n\n...（其餘條目請於本地檔案查看）"
+
+        await query.edit_message_text(
+            text=text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 返回總覽", callback_data="view_mem_overview")]
+            ])
+        )
+
+    elif data == "view_mem_overview":
+        from memory_manager import read_entries, MEMORY_DIR
+        user_entries = read_entries("user")
+        sys_entries = read_entries("memory")
+        overview = (
+            "🧠 **本機持久化記憶管理 (Hermes Architecture)**\n"
+            f"📂 儲存路徑：`{MEMORY_DIR}`\n\n"
+            f"👤 **用戶偏好與規則 (USER.md)**：共 `{len(user_entries)}` 條\n"
+            f"🖥️ **系統事實與環境配置 (MEMORY.md)**：共 `{len(sys_entries)}` 條\n\n"
+            "• 搜尋記憶：`/memory search <關鍵字>`\n"
+            "• 添加記憶：`/memory add [user] <內容>`\n"
+            "• 刪除記憶：`/memory remove [user] <關鍵字>`"
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👤 查看 USER.md", callback_data="view_mem:user"),
+                InlineKeyboardButton("🖥️ 查看 MEMORY.md", callback_data="view_mem:sys"),
+            ],
+            [InlineKeyboardButton("❌ 關閉", callback_data="view_mem:close")]
+        ])
+        await query.edit_message_text(text=overview, reply_markup=kb)
+
     elif data == "noop":
         pass
 
@@ -1022,6 +1153,7 @@ async def post_init(app: Application) -> None:
     commands = [
         BotCommand("usage", "📊 查看 Token 用量與資源消耗統計"),
         BotCommand("model", "🧠 切換 AI 模型"),
+        BotCommand("memory", "🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)"),
         BotCommand("compact", "📦 壓縮當前會話上下文（瘦身並保留關鍵記憶）"),
         BotCommand("status", "📈 查看系統狀態與當前會話"),
         BotCommand("reset", "🔄 重置會話記憶（開啟新對話）"),
@@ -1065,6 +1197,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["start"], cmd_start))
     app.add_handler(CommandHandler(["usage"], cmd_usage))
     app.add_handler(CommandHandler(["model", "models"], cmd_model))
+    app.add_handler(CommandHandler(["memory", "mem"], cmd_memory))
     app.add_handler(CommandHandler(["compact", "summarize"], cmd_compact))
     app.add_handler(CommandHandler(["reset", "new"], cmd_reset))
     app.add_handler(CommandHandler(["status"], cmd_status))

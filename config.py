@@ -73,6 +73,20 @@ CACHE_DIR: Path = Path(os.getenv("CACHE_DIR", str(Path.home() / ".gemini" / "tg_
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
+# Persistent Memory & State Settings (Hermes-compatible Architecture)
+# ---------------------------------------------------------------------------
+# Directory where persistent memories (MEMORY.md, USER.md) are stored.
+# Defaults to ~/.hermes/memories if present to share memory with Hermes Agent.
+_hermes_mem_dir = Path.home() / ".hermes" / "memories"
+_default_mem_dir = _hermes_mem_dir if _hermes_mem_dir.exists() else Path.home() / ".gemini" / "tg_bot_memories"
+MEMORY_DIR: Path = Path(os.getenv("MEMORY_DIR", str(_default_mem_dir)))
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+# State persistence file to guarantee session & conversation continuity across restarts/disconnects
+STATE_FILE: Path = Path(os.getenv("STATE_FILE", str(Path.home() / ".gemini" / "tg_bot_state.json")))
+STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
 # Auth Helper
 # ---------------------------------------------------------------------------
 def is_authorized(user_id: int) -> bool:

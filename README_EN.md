@@ -34,7 +34,13 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
 - **Paginated `/model` Selector**: Clickable inline keyboard buttons to switch instantly between Gemini 3.8 Flash, Gemini 3.7 Flash (High), Claude Opus 4.6 (Thinking), and more.
 - **Live Progress Updates**: Continuous typing heartbeat with dynamic status editing reflecting tools (🔧 Tool execution, 🔍 Search, 📄 File read/write, 🧠 Thinking), accompanied by an instant **🛑 Cancel** button.
 
-### 5. 🌐 Network Resilience & Proxy Support
+### 5. 🧠 Persistent Local Memory System (Hermes Agent Architecture)
+- **Dual-Store Architecture**: Compatible with Hermes Agent, managing `USER.md` (communication habits, preferences, rules) and `MEMORY.md` (server IPs, credentials, ports, architectural decisions) delimited by `§`.
+- **Crash-Resilient State Persistence**: Active session IDs, model selections, and token counters are atomically persisted to disk. Reboots or network drops will **never wipe conversation context**.
+- **Continual Listening & Runtime Extractor**: Actively listens to Telegram chats and monitors execution outcomes to extract and store durable facts and guidelines.
+- **Frozen Snapshot Pattern**: Inject memories at session start without disturbing LLM prefix caching, conserving tokens while preserving recall.
+
+### 6. 🌐 Network Resilience & Proxy Support
 - Supports HTTP, HTTPS, and SOCKS5 proxies (`PROXY_URL`).
 - Automatic connection pool drainage and exponential backoff retry during Mac sleep/wake cycles, WiFi switches, or network interruptions.
 
@@ -46,6 +52,8 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
 tg-antigravity-bot/
 ├── bot.py             # Main entry point, Telegram update router & turn pipeline
 ├── config.py          # Environment settings, authentication checks & defaults
+├── memory_manager.py  # Local dual-store persistent memory (USER.md / MEMORY.md) & listener
+├── session_store.py   # Crash-resilient state persistence engine (atomic JSON serialization)
 ├── formatter.py       # MarkdownV2 converter, GFM table wrapper & code-aware chunking
 ├── agent_runner.py    # agy CLI subprocess management, stderr streaming & task cancellation
 ├── media_handler.py   # Inbound media download cache & outbound media detection
@@ -113,6 +121,8 @@ python bot.py
 | `/start` | Welcome screen, view User ID and quick start guide |
 | `/usage` | 📊 View session, turn, and total token usage statistics |
 | `/model` | Open interactive button menu to switch AI models with pagination |
+| `/memory` or `/mem` | 🧠 View, search, and manage local persistent memories (`USER.md` / `MEMORY.md`) |
+| `/compact` | 📦 Compact current conversation history while preserving key decisions |
 | `/reset` or `/new` | Reset conversation memory and start a fresh session |
 | `/status` | View agent health, token usage, active model, session ID, workspace, and uptime |
 | `/cancel` or `/stop` | Abort a long-running agent turn immediately |

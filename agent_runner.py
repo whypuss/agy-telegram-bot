@@ -27,58 +27,24 @@ from config import (
 
 logger = logging.getLogger("agy-tg-bot.runner")
 
+from session_store import (
+    user_conversations,
+    user_models,
+    user_session_usage,
+    user_last_turn_usage,
+    user_lifetime_usage,
+    get_user_model,
+    set_user_model,
+    get_user_conversation,
+    set_user_conversation,
+    reset_user_conversation,
+    get_user_usage_summary,
+    save_state,
+)
+from memory_manager import build_memory_context, monitor_and_extract, add_entry
+
 # User ID -> Active subprocess
 _active_processes: Dict[int, asyncio.subprocess.Process] = {}
-
-# User ID -> Active Conversation ID
-user_conversations: Dict[int, str] = {}
-
-# User ID -> Selected Model
-user_models: Dict[int, str] = {}
-
-# User ID -> Active Session Usage dict (cumulative for active conversation)
-user_session_usage: Dict[int, dict] = {}
-
-# User ID -> Last Turn Usage dict (delta for the latest single turn)
-user_last_turn_usage: Dict[int, dict] = {}
-
-# User ID -> Lifetime Usage dict (total across all sessions since bot startup)
-user_lifetime_usage: Dict[int, dict] = {}
-
-
-def get_user_model(user_id: int) -> str:
-    """Get the current model for a user, or default."""
-    return user_models.get(user_id, DEFAULT_MODEL)
-
-
-def set_user_model(user_id: int, model_name: str) -> None:
-    """Set the model for a user and reset their conversation context."""
-    user_models[user_id] = model_name
-    reset_user_conversation(user_id)
-
-
-def get_user_conversation(user_id: int) -> Optional[str]:
-    """Get the active conversation ID for a user."""
-    return user_conversations.get(user_id)
-
-
-def reset_user_conversation(user_id: int) -> None:
-    """Reset the conversation context and session usage for a user."""
-    user_conversations.pop(user_id, None)
-    user_session_usage.pop(user_id, None)
-    user_last_turn_usage.pop(user_id, None)
-
-
-def get_user_usage_summary(user_id: int) -> dict:
-    """Get usage summary including current session, last turn, and lifetime statistics."""
-    return {
-        "session": user_session_usage.get(user_id),
-        "last_turn": user_last_turn_usage.get(user_id),
-        "lifetime": user_lifetime_usage.get(
-            user_id,
-            {"turns": 0, "total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0},
-        ),
-    }
 
 
 def is_user_task_running(user_id: int) -> bool:
@@ -243,6 +209,14 @@ async def run_agent_turn(
     model = get_user_model(user_id)
     conv_id = get_user_conversation(user_id)
 
+    # Hermes Frozen Snapshot Pattern:
+    # If starting a fresh session (no conv_id), inject persistent memory context (USER.md + MEMORY.md)
+    effective_prompt = prompt
+    if not conv_id:
+        mem_ctx = build_memory_context()
+        if mem_ctx:
+            effective_prompt = f"{mem_ctx}\n{prompt}"
+
     cmd = [AGY_PATH]
     cmd.extend(["--print-timeout", f"{AGY_TIMEOUT}s"])
     cmd.extend(["--dangerously-skip-permissions"])
@@ -258,7 +232,7 @@ async def run_agent_turn(
         cmd.extend(["--add-dir", WORKSPACE_DIR])
 
     # Append prompt to --print
-    cmd.append(f"--print={prompt}")
+    cmd.append(f"--print={effective_prompt}")
 
     logger.info("Executing agy for user %s: %s", user_id, " ".join(cmd[:6]))
 
@@ -445,7 +419,10 @@ async def run_agent_turn(
                     break
 
     if new_conv_id:
-        user_conversations[user_id] = new_conv_id
+        set_user_conversation(user_id, new_conv_id)
+
+    # Persist session state to local disk immediately (crash/disconnect resilient)
+    save_state()
 
     # Handle error cases
     if not response_text:
@@ -493,6 +470,13 @@ async def run_agent_turn(
             response_text = "\n".join(err_lines)
         else:
             response_text = "（Agent 回覆為空）"
+
+    # Continual Listening & Runtime Memory Extractor in background
+    if response_text and not response_text.startswith("❌"):
+        try:
+            asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
+        except Exception:
+            pass
 
     return response_text, new_conv_id, turn_usage
 
@@ -561,6 +545,12 @@ async def compact_user_conversation(
     
     new_session = user_session_usage.get(user_id, {})
     new_tokens = new_session.get("total_tokens", 0)
-    
+
+    # Persist distilled project decision summary to local MEMORY.md
+    try:
+        add_entry("memory", f"會話提煉決策摘要：\n{summary_reply[:1000]}")
+    except Exception:
+        pass
+
     return True, summary_reply, old_tokens, new_tokens
 
