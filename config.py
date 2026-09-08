@@ -47,8 +47,8 @@ else:
 # Default Model
 DEFAULT_MODEL: str = os.getenv("AGY_MODEL", "Gemini 3.8 Flash (Medium)").strip()
 
-# Timeout per agent turn (in seconds)
-AGY_TIMEOUT: int = int(os.getenv("AGY_TIMEOUT", "300"))
+# Timeout per agent turn (in seconds, default: 3600 = 1 hour)
+AGY_TIMEOUT: int = int(os.getenv("AGY_TIMEOUT", "3600"))
 
 # Default working directory for the agent
 WORKSPACE_DIR: str = os.getenv("WORKSPACE_DIR", str(Path.home())).strip()

@@ -457,13 +457,22 @@ async def run_agent_turn(
             
             err_lines = [f"❌ **Agent 執行失敗 (Exit Code: {proc.returncode})**"]
             
-            # Check for context overflow / high token saturation
+            # Check for timeout vs context saturation
             sess = user_session_usage.get(user_id, {})
             tot_tok = sess.get("total_tokens", 0)
             in_tok = sess.get("input_tokens", 0)
             turns = sess.get("num_turns", 0)
             
-            if tot_tok > 150000 or in_tok > 150000 or turns > 40:
+            if "timeout" in err_detail.lower():
+                err_lines.append(
+                    f"\n⏰ **執行超時 (Timeout: {AGY_TIMEOUT}s)**\n"
+                    f"• 任務執行耗時達到上限（{AGY_TIMEOUT // 60} 分鐘），進程已被中止。\n"
+                    f"• 期間累計消耗：`{tot_tok:,}` tokens (輸入 `{in_tok:,}` / 共 `{turns}` 輪)\n\n"
+                    f"💡 **建議解法：**\n"
+                    f"1. 如任務較長可繼續在 .env 調大 AGY_TIMEOUT\n"
+                    f"2. 拆分步驟發送，或使用 `/compact` / `/reset` 減少每次步驟的上下文負擔"
+                )
+            elif tot_tok > 150000 or in_tok > 150000 or turns > 40:
                 err_lines.append(
                     f"\n⚠️ **可能原因：會話上下文過載 (Context Saturation)**\n"
                     f"• 當前會話累積：`{tot_tok:,}` tokens (輸入 `{in_tok:,}` / 共 `{turns}` 輪)\n"
