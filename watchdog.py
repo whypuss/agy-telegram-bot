@@ -54,11 +54,12 @@ def is_telegram_api_reachable() -> bool:
 def is_process_running() -> bool:
     try:
         # Check launchctl first if on macOS
-        res = subprocess.run(["launchctl", "list", "ai.hermes.gateway"], capture_output=True, text=True)
-        if res.returncode == 0:
-            for line in res.stdout.splitlines():
-                if '"PID"' in line:
-                    return True
+        for label in ["com.whypuss.agy-telegram-bot", "com.agy.gateway", "ai.hermes.gateway"]:
+            res = subprocess.run(["launchctl", "list", label], capture_output=True, text=True)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    if '"PID"' in line:
+                        return True
     except Exception:
         pass
 
@@ -90,7 +91,7 @@ def restart_service():
 
     # Try launchctl if configured
     uid = os.getuid()
-    for label in ["com.agy.gateway", "ai.hermes.gateway"]:
+    for label in ["com.whypuss.agy-telegram-bot", "com.agy.gateway", "ai.hermes.gateway"]:
         res = subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], capture_output=True)
         if res.returncode == 0:
             log(f"[Watchdog] Triggered launchctl kickstart on {label}")
