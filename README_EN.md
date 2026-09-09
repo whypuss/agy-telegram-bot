@@ -44,6 +44,16 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
 - Supports HTTP, HTTPS, and SOCKS5 proxies (`PROXY_URL`).
 - Automatic connection pool drainage and exponential backoff retry during Mac sleep/wake cycles, WiFi switches, or network interruptions.
 
+### 7. 🔒 Strict Telegram ID Whitelist & Binding
+- **Security Isolation**: Only users explicitly bound in `ALLOWED_USER_IDS` or `TELEGRAM_ALLOWED_USERS` can interact with the bot.
+- **Unauthorized Interception**: Unregistered senders are immediately blocked from consuming LLM calls or executing commands, receiving an unauthorized alert showing their user ID.
+- **Dynamic Binding CLI**: Add or remove authorized Telegram IDs anytime via `agy-gateway bind <id>` and `agy-gateway unbind <id>`.
+
+### 8. ⏱️ 1-Minute Watchdog & Auto-Reconnect Recovery
+- **Continuous Health Probing**: Periodically checks process liveness and tests Telegram API connectivity every 60 seconds (`watchdog.py`).
+- **Automatic Reconnection**: Automatically detects broken connections, hung loops, or DNS/network transitions, triggering a graceful service restart to restore communication.
+- **Unified Management CLI `agy-gateway`**: Complete operational command suite (`status`, `start`, `stop`, `restart`, `check`, `logs`), packaged with ready-to-use macOS LaunchAgent and Linux Systemd templates for persistent 24/7 background operation.
+
 ---
 
 ## 📁 Repository Structure

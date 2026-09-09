@@ -1,0 +1,8 @@
+[Unit]
+Description=Antigravity Telegram Bot 1-Minute Watchdog
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/tg-antigravity-bot
+ExecStart=/usr/bin/python3 %h/tg-antigravity-bot/watchdog.py

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Antigravity Telegram Bot Watchdog Every 1 Minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=agy-gateway-watchdog.service
+
+[Install]
+WantedBy=timers.target

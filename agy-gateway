@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""
+agy-gateway: CLI management tool for Antigravity (AGY) Telegram Bot & Gateway.
+Provides status, start, stop, restart, health check, and Telegram ID binding.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent.resolve()
+ENV_FILE = BASE_DIR / ".env"
+WATCHDOG_SCRIPT = BASE_DIR / "watchdog.py"
+LOG_FILE = BASE_DIR / "bot.log"
+ERR_LOG = BASE_DIR / "bot.err.log"
+
+def get_allowed_users() -> list[str]:
+    users = []
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("ALLOWED_USER_IDS=") or line.startswith("TELEGRAM_ALLOWED_USERS="):
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                users = [u.strip() for u in val.split(",") if u.strip()]
+                if users:
+                    break
+    return users
+
+def set_allowed_users(users: list[str]):
+    csv = ",".join(users)
+    if ENV_FILE.exists():
+        lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+        found_allowed = False
+        found_tg = False
+        new_lines = []
+        for line in lines:
+            if line.startswith("ALLOWED_USER_IDS="):
+                new_lines.append(f"ALLOWED_USER_IDS={csv}")
+                found_allowed = True
+            elif line.startswith("TELEGRAM_ALLOWED_USERS="):
+                new_lines.append(f"TELEGRAM_ALLOWED_USERS={csv}")
+                found_tg = True
+            else:
+                new_lines.append(line)
+        if not found_allowed:
+            new_lines.append(f"ALLOWED_USER_IDS={csv}")
+        if not found_tg:
+            new_lines.append(f"TELEGRAM_ALLOWED_USERS={csv}")
+        ENV_FILE.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    else:
+        ENV_FILE.write_text(f"ALLOWED_USER_IDS={csv}\nTELEGRAM_ALLOWED_USERS={csv}\n", encoding="utf-8")
+
+def get_running_pid() -> int | None:
+    try:
+        res = subprocess.run(["pgrep", "-f", "bot.py"], capture_output=True, text=True)
+        for line in res.stdout.splitlines():
+            pid = line.strip()
+            if pid.isdigit() and int(pid) != os.getpid():
+                return int(pid)
+    except Exception:
+        pass
+    return None
+
+def cmd_status():
+    print("========================================")
+    print("      AGY Dedicated Gateway Status      ")
+    print("========================================")
+    pid = get_running_pid()
+    if pid:
+        print(f"● Service Process : RUNNING (PID {pid})")
+    else:
+        print("○ Service Process : STOPPED")
+
+    # LaunchAgent status
+    res_la = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    if "ai.hermes.gateway" in res_la.stdout or "agy-telegram-bot" in res_la.stdout:
+        print("● LaunchAgent     : SUPERVISED (Auto-Start on Boot)")
+    else:
+        print("○ LaunchAgent     : NOT REGISTERED")
+
+    # Watchdog status
+    res_wd = subprocess.run(["launchctl", "list", "com.agy.gateway-watchdog"], capture_output=True, text=True)
+    if res_wd.returncode == 0:
+        print("● 1-Min Watchdog  : ACTIVE (Auto-Recovery every 60s)")
+    else:
+        print("○ 1-Min Watchdog  : INACTIVE")
+
+    # Bound users
+    users = get_allowed_users()
+    if users:
+        print(f"🔒 Bound TG IDs   : {', '.join(users)} (Strict Verification)")
+    else:
+        print("⛔ Bound TG IDs   : NONE (Strict Access: All requests blocked)")
+    print("========================================")
+
+def cmd_start():
+    print("▶ Starting AGY Gateway...")
+    start_sh = BASE_DIR / "start.sh"
+    if start_sh.exists():
+        subprocess.run(["bash", str(start_sh)])
+    else:
+        subprocess.run(["python3", str(BASE_DIR / "bot.py")])
+
+def cmd_stop():
+    print("⏹ Stopping AGY Gateway...")
+    stop_sh = BASE_DIR / "stop.sh"
+    if stop_sh.exists():
+        subprocess.run(["bash", str(stop_sh)])
+    else:
+        pid = get_running_pid()
+        if pid:
+            os.kill(pid, 15)
+            print(f"✓ Killed PID {pid}")
+
+def cmd_restart():
+    print("↻ Restarting AGY Gateway...")
+    restart_sh = BASE_DIR / "restart.sh"
+    if restart_sh.exists():
+        subprocess.run(["bash", str(restart_sh)])
+    else:
+        cmd_stop()
+        import time
+        time.sleep(1)
+        cmd_start()
+
+def cmd_check():
+    print("🔍 Running 1-minute watchdog check...")
+    if WATCHDOG_SCRIPT.exists():
+        subprocess.run(["python3", str(WATCHDOG_SCRIPT)])
+    cmd_status()
+
+def cmd_logs():
+    logs_sh = BASE_DIR / "logs.sh"
+    if logs_sh.exists():
+        subprocess.run(["bash", str(logs_sh)])
+    elif LOG_FILE.exists():
+        subprocess.run(["tail", "-n", "30", str(LOG_FILE)])
+    else:
+        print("No log files found.")
+
+def cmd_bind(user_id: str):
+    user_id = str(user_id).strip()
+    if not user_id or not user_id.isdigit():
+        print("Error: Please provide a valid numeric Telegram User ID.")
+        return
+    users = get_allowed_users()
+    if user_id in users:
+        print(f"User ID {user_id} is already bound.")
+        return
+    users.append(user_id)
+    set_allowed_users(users)
+    print(f"✓ Successfully bound Telegram ID: {user_id}")
+    cmd_restart()
+
+def cmd_unbind(user_id: str):
+    user_id = str(user_id).strip()
+    users = get_allowed_users()
+    if user_id not in users:
+        print(f"User ID {user_id} is not in the bound list.")
+        return
+    users.remove(user_id)
+    set_allowed_users(users)
+    print(f"✓ Successfully unbound Telegram ID: {user_id}")
+    cmd_restart()
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("status", "info"):
+        cmd_status()
+    elif args[0] == "start":
+        cmd_start()
+    elif args[0] == "stop":
+        cmd_stop()
+    elif args[0] == "restart":
+        cmd_restart()
+    elif args[0] == "check":
+        cmd_check()
+    elif args[0] == "logs":
+        cmd_logs()
+    elif args[0] == "bind":
+        if len(args) < 2:
+            print("Usage: agy-gateway bind <telegram_id>")
+        else:
+            cmd_bind(args[1])
+    elif args[0] == "unbind":
+        if len(args) < 2:
+            print("Usage: agy-gateway unbind <telegram_id>")
+        else:
+            cmd_unbind(args[1])
+    else:
+        print("Usage: agy-gateway [status|start|stop|restart|check|logs|bind <id>|unbind <id>]")
+
+if __name__ == "__main__":
+    main()

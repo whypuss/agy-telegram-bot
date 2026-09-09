@@ -44,6 +44,16 @@
 - 支援 HTTP / HTTPS / SOCKS5 代理。
 - 具備連線池重設與指數退避重試機制，在電腦睡眠喚醒、WiFi 切換時自動平滑重連。
 
+### 7. 🔒 嚴格 Telegram ID 白名單綁定 (Strict User Binding)
+- **安全隔離**：只有明確在 `ALLOWED_USER_IDS` 或 `TELEGRAM_ALLOWED_USERS` 綁定的 Telegram ID 才能使用 Bot。
+- **陌生人自動攔截**：未授權使用者傳送訊息會立刻被安全攔截並提示其 Telegram ID，防止未授權使用與 API 額度消耗。
+- **動態綁定支援**：可透過 `agy-gateway bind <id>` 與 `agy-gateway unbind <id>` 即時管理授權名單。
+
+### 8. ⏱️ 1 分鐘守護與掉線自動恢復 (Watchdog & Auto-Reconnect)
+- **全自動狀態探測**：每 60 秒透過 `watchdog.py` 檢查進程存活與 Telegram API 連通性。
+- **自動拉起與重連**：若發現網路重置或進程異常，守護程序會自動執行優雅重連與重啟，杜絕靜默斷線。
+- **專屬維運指令 `agy-gateway`**：整合 `status`、`start`、`stop`、`restart`、`check`、`logs`，並內建 macOS LaunchAgent 與 Linux Systemd 開機持久自啟服務模板。
+
 ---
 
 ## 📁 模組化專案架構

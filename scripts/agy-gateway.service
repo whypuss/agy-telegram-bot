@@ -1,0 +1,15 @@
+[Unit]
+Description=Antigravity Telegram Bot Gateway
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/tg-antigravity-bot
+ExecStart=%h/tg-antigravity-bot/venv/bin/python3 %h/tg-antigravity-bot/bot.py
+Restart=always
+RestartSec=10
+StandardOutput=append:%h/tg-antigravity-bot/bot.log
+StandardError=append:%h/tg-antigravity-bot/bot.err.log
+
+[Install]
+WantedBy=default.target

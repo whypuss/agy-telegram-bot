@@ -16,9 +16,9 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
-# Allowed Telegram User IDs (comma-separated). If empty, warning will be logged.
+# Allowed Telegram User IDs (comma-separated). Strict check enabled.
 ALLOWED_USER_IDS: set[int] = set()
-_raw_user_ids = os.getenv("ALLOWED_USER_IDS", "").strip()
+_raw_user_ids = os.getenv("ALLOWED_USER_IDS", "").strip() or os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
 if _raw_user_ids:
     for uid_str in _raw_user_ids.split(","):
         uid_str = uid_str.strip()
@@ -90,7 +90,7 @@ STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 # Auth Helper
 # ---------------------------------------------------------------------------
 def is_authorized(user_id: int) -> bool:
-    """Check if the user is in the allowed user set. If set is empty, allow all."""
+    """Check if the user is in the allowed user set. Strict verification: must be explicitly bound."""
     if not ALLOWED_USER_IDS:
-        return True
+        return False
     return user_id in ALLOWED_USER_IDS
