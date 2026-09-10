@@ -23,6 +23,7 @@ from config import (
     DEFAULT_MODEL,
     WORKSPACE_DIR,
     AGENT_SYSTEM_PROMPT,
+    is_opencode_model,
 )
 
 logger = logging.getLogger("agy-tg-bot.runner")
@@ -46,20 +47,56 @@ from memory_manager import build_memory_context, monitor_and_extract, add_entry
 # User ID -> Active subprocess
 _active_processes: Dict[int, asyncio.subprocess.Process] = {}
 
+# Users whose running process was deliberately terminated via _cancel_agy_task
+# (user cancel / correction steer). Used to convert the resulting non-zero
+# exit into asyncio.CancelledError instead of a spurious "執行失敗" message.
+_cancelled_users: set = set()
+
+# User ID -> Last known agy cumulative usage (agy-only baseline for turn deltas,
+# so interleaved OpenCode fallback turns never corrupt agy delta math)
+_agy_last_cumulative: Dict[int, dict] = {}
+
+# User ID -> Backend that served the last turn ("agy" | "opencode" | "agy+fallback")
+_last_backend: Dict[int, str] = {}
+
+
+def get_last_backend(user_id: int) -> str:
+    """Return which backend served the user's last turn."""
+    return _last_backend.get(user_id, "opencode" if is_opencode_model(get_user_model(user_id)) else "agy")
+
 
 def is_user_task_running(user_id: int) -> bool:
     """Check if a task is currently executing for a user."""
     proc = _active_processes.get(user_id)
-    return proc is not None and proc.returncode is None
+    if proc is not None and proc.returncode is None:
+        return True
+    try:
+        from opencode_runner import is_oc_task_running
+        return is_oc_task_running(user_id)
+    except Exception:
+        return False
 
 
 async def cancel_user_task(user_id: int) -> bool:
     """Cancel and terminate any currently running task for the specified user."""
+    cancelled = await _cancel_agy_task(user_id)
+    try:
+        from opencode_runner import cancel_oc_task
+        if await cancel_oc_task(user_id):
+            cancelled = True
+    except Exception:
+        pass
+    return cancelled
+
+
+async def _cancel_agy_task(user_id: int) -> bool:
+    """Cancel and terminate any currently running agy task for the specified user."""
     proc = _active_processes.get(user_id)
     if not proc or proc.returncode is not None:
         return False
 
     logger.info("Cancelling active agy task for user %s (PID %s)", user_id, proc.pid)
+    _cancelled_users.add(user_id)
     try:
         proc.terminate()
         # Wait up to 2 seconds for graceful exit, then force kill
@@ -190,19 +227,14 @@ def _parse_stderr_line_to_indicator(line: str) -> Optional[str]:
 # Core Execution Engine
 # ---------------------------------------------------------------------------
 
-async def run_agent_turn(
+async def _run_agy_turn(
     prompt: str,
     user_id: int,
     on_progress: Optional[Callable[[str], Coroutine]] = None,
 ) -> Tuple[str, Optional[str], Optional[dict]]:
     """
-    Execute a turn of the Antigravity Agent for a user.
-    
-    Args:
-        prompt: User input prompt (may include media references)
-        user_id: Telegram user ID
-        on_progress: Async callback invoked with progress indicator strings
-        
+    Execute a turn of the Antigravity Agent for a user (agy backend only).
+
     Returns:
         (response_text, new_conversation_id, turn_usage)
     """
@@ -253,16 +285,10 @@ async def run_agent_turn(
     )
 
     _active_processes[user_id] = proc
+    _cancelled_users.discard(user_id)
     stderr_lines: list[str] = []
     stdout_raw_lines: list[str] = []
     result_data: dict = {}
-
-    # Close stdin since prompt is passed via CLI flag
-    if proc.stdin:
-        try:
-            proc.stdin.close()
-        except Exception:
-            pass
 
     async def _stream_stdout():
         while True:
@@ -328,6 +354,14 @@ async def run_agent_turn(
             stdout_task.cancel()
         _active_processes.pop(user_id, None)
 
+    # Process was deliberately terminated (user cancel / correction steer):
+    # surface as a cancellation so the bot layer can stay silent or re-merge,
+    # instead of showing a spurious "Exit Code: -15" failure.
+    if user_id in _cancelled_users:
+        _cancelled_users.discard(user_id)
+        logger.info("agy task for user %s terminated by cancellation", user_id)
+        raise asyncio.CancelledError()
+
     stderr_text = "\n".join(stderr_lines)
 
     response_text = ""
@@ -366,17 +400,31 @@ async def run_agent_turn(
         cache_read_tokens = raw_usage.get("cache_read_tokens", 0)
         total_tokens = raw_usage.get("total_tokens", 0)
 
-        # Compute delta for this single turn against previous session total
-        prev_session = user_session_usage.get(user_id, {})
-        prev_total = prev_session.get("total_tokens", 0)
-        prev_input = prev_session.get("input_tokens", 0)
-        prev_output = prev_session.get("output_tokens", 0)
-        prev_thinking = prev_session.get("thinking_tokens", 0)
+        # Compute delta for this single turn against the agy-only baseline.
+        # (Session totals are updated additively so interleaved OpenCode
+        # fallback turns never corrupt agy delta math.)
+        baseline = _agy_last_cumulative.get(user_id)
+        if baseline is None:
+            sess = user_session_usage.get(user_id, {})
+            if sess.get("total_tokens"):
+                baseline = dict(sess)
+            else:
+                baseline = {"total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
+        prev_total = baseline.get("total_tokens", 0)
+        prev_input = baseline.get("input_tokens", 0)
+        prev_output = baseline.get("output_tokens", 0)
+        prev_thinking = baseline.get("thinking_tokens", 0)
 
         turn_input = max(0, input_tokens - prev_input) if prev_total > 0 else input_tokens
         turn_output = max(0, output_tokens - prev_output) if prev_total > 0 else output_tokens
         turn_thinking = max(0, thinking_tokens - prev_thinking) if prev_total > 0 else thinking_tokens
         turn_total = max(0, total_tokens - prev_total) if prev_total > 0 else total_tokens
+        _agy_last_cumulative[user_id] = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "thinking_tokens": thinking_tokens,
+            "total_tokens": total_tokens,
+        }
 
         turn_usage = {
             "input_tokens": turn_input,
@@ -388,14 +436,15 @@ async def run_agent_turn(
         }
         user_last_turn_usage[user_id] = turn_usage
 
-        # Update cumulative session usage
+        # Update cumulative session usage additively
+        prev_session = user_session_usage.get(user_id, {})
         user_session_usage[user_id] = {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "thinking_tokens": thinking_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "total_tokens": total_tokens,
-            "num_turns": num_turns,
+            "input_tokens": prev_session.get("input_tokens", 0) + turn_input,
+            "output_tokens": prev_session.get("output_tokens", 0) + turn_output,
+            "thinking_tokens": prev_session.get("thinking_tokens", 0) + turn_thinking,
+            "cache_read_tokens": prev_session.get("cache_read_tokens", 0) + cache_read_tokens,
+            "total_tokens": prev_session.get("total_tokens", 0) + turn_total,
+            "num_turns": prev_session.get("num_turns", 0) + 1,
         }
 
         # Update lifetime usage
@@ -479,6 +528,47 @@ async def run_agent_turn(
             pass
 
     return response_text, new_conv_id, turn_usage
+
+
+async def run_agent_turn(
+    prompt: str,
+    user_id: int,
+    on_progress: Optional[Callable[[str], Coroutine]] = None,
+) -> Tuple[str, Optional[str], Optional[dict]]:
+    """
+    Execute a turn, routing to agy or local OpenCode by the user's model.
+
+    Agy-model turns automatically fall back to local OpenCode once when the
+    agy backend errors, times out, or returns empty.
+
+    Returns:
+        (response_text, new_conversation_id, turn_usage)
+    """
+    model = get_user_model(user_id)
+
+    if is_opencode_model(model):
+        from opencode_runner import run_opencode_turn
+        _last_backend[user_id] = "opencode"
+        return await run_opencode_turn(
+            prompt=prompt,
+            user_id=user_id,
+            model=model,
+            on_progress=on_progress,
+        )
+
+    try:
+        reply_text, new_conv_id, turn_usage = await _run_agy_turn(
+            prompt=prompt,
+            user_id=user_id,
+            on_progress=on_progress,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("agy turn raised for user %s: %s", user_id, e)
+        raise
+
+    return reply_text, new_conv_id, turn_usage
 
 
 async def compact_user_conversation(

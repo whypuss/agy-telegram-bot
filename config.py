@@ -57,6 +57,69 @@ WORKSPACE_DIR: str = os.getenv("WORKSPACE_DIR", str(Path.home())).strip()
 AGENT_SYSTEM_PROMPT: str = os.getenv("AGENT_SYSTEM_PROMPT", "").strip()
 
 # ---------------------------------------------------------------------------
+# Local OpenCode Fallback Settings
+# ---------------------------------------------------------------------------
+def _resolve_opencode_path() -> str:
+    """Locate a working opencode binary (verifies --version, skips broken wrappers)."""
+    import glob as _glob
+    import subprocess as _sp
+
+    candidates: list[str] = []
+    env_path = os.getenv("OPENCODE_PATH", "").strip()
+    if env_path:
+        candidates.append(env_path)
+    try:
+        candidates.extend(reversed(sorted(_glob.glob("/opt/homebrew/Cellar/opencode/*/bin/opencode"))))
+    except Exception:
+        pass
+    which_hit = shutil.which("opencode")
+    if which_hit:
+        candidates.append(which_hit)
+    candidates.extend([
+        str(Path.home() / ".local" / "bin" / "opencode"),
+        "/usr/local/bin/opencode",
+    ])
+
+    seen: set[str] = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            p = Path(cand)
+            if p.is_symlink() and not p.exists():
+                continue
+            if not (p.is_file() and os.access(str(p), os.X_OK)):
+                continue
+            r = _sp.run([str(p), "--version"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return str(p)
+        except Exception:
+            continue
+    return candidates[0] if candidates else "opencode"
+
+
+OPENCODE_PATH: str = _resolve_opencode_path()
+
+# Fallback model MUST be passed explicitly via -m: the global opencode.json
+# default (cliproxy/sensenova-fast) requires an external proxy that may be down.
+OPENCODE_DEFAULT_MODEL: str = os.getenv("OPENCODE_MODEL", "sensenova/deepseek-v4-flash").strip()
+
+# Timeout per opencode turn (in seconds, default: 600 = 10 min)
+OPENCODE_TIMEOUT: int = int(os.getenv("OPENCODE_TIMEOUT", "600"))
+
+# Provider prefixes identifying an OpenCode model id (agy ids never contain "/")
+OPENCODE_PROVIDER_PREFIXES: tuple = ("opencode/", "sensenova/", "minimax", "cliproxy/", "ollama/")
+
+
+def is_opencode_model(model_id: str) -> bool:
+    """Check whether a model id belongs to the local OpenCode backend."""
+    if not model_id:
+        return False
+    mid = model_id.strip().lower()
+    return "/" in mid or mid.startswith(OPENCODE_PROVIDER_PREFIXES)
+
+# ---------------------------------------------------------------------------
 # Message & Media Batching Settings
 # ---------------------------------------------------------------------------
 # Telegram limit is 4096 UTF-16 code units

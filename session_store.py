@@ -25,6 +25,12 @@ user_conversations: Dict[int, str] = {}
 # User ID -> Selected Model
 user_models: Dict[int, str] = {}
 
+# User ID -> Active OpenCode Session ID (separate from agy conversations)
+user_oc_sessions: Dict[int, str] = {}
+
+# User ID -> Preferred OpenCode model
+user_oc_models: Dict[int, str] = {}
+
 # User ID -> Active Session Usage dict (cumulative for active conversation)
 user_session_usage: Dict[int, dict] = {}
 
@@ -38,6 +44,7 @@ user_lifetime_usage: Dict[int, dict] = {}
 def load_state() -> None:
     """Load session state from disk on startup."""
     global user_conversations, user_models, user_session_usage, user_last_turn_usage, user_lifetime_usage
+    global user_oc_sessions, user_oc_models
     with _state_lock:
         if not STATE_FILE.exists():
             logger.info("No existing state file found at %s. Initializing fresh state.", STATE_FILE)
@@ -61,6 +68,8 @@ def load_state() -> None:
 
             user_conversations = _int_dict(data.get("conversations", {}))
             user_models = _int_dict(data.get("models", {}))
+            user_oc_sessions = _int_dict(data.get("oc_sessions", {}))
+            user_oc_models = _int_dict(data.get("oc_models", {}))
             user_session_usage = _int_dict(data.get("session_usage", {}))
             user_last_turn_usage = _int_dict(data.get("last_turn_usage", {}))
             user_lifetime_usage = _int_dict(data.get("lifetime_usage", {}))
@@ -81,6 +90,8 @@ def save_state() -> None:
         data = {
             "conversations": {str(k): v for k, v in user_conversations.items()},
             "models": {str(k): v for k, v in user_models.items()},
+            "oc_sessions": {str(k): v for k, v in user_oc_sessions.items()},
+            "oc_models": {str(k): v for k, v in user_oc_models.items()},
             "session_usage": {str(k): v for k, v in user_session_usage.items()},
             "last_turn_usage": {str(k): v for k, v in user_last_turn_usage.items()},
             "lifetime_usage": {str(k): v for k, v in user_lifetime_usage.items()},
@@ -111,6 +122,12 @@ def set_user_model(user_id: int, model_name: str) -> None:
     user_models[user_id] = model_name
     reset_user_conversation(user_id)
     save_state()
+    user_session_usage.pop(user_id, None)
+    user_last_turn_usage.pop(user_id, None)
+    save_state()
+
+
+
 
 
 def get_user_conversation(user_id: int) -> Optional[str]:
@@ -142,6 +159,41 @@ def get_user_usage_summary(user_id: int) -> dict:
             {"turns": 0, "total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0},
         ),
     }
+
+
+def get_user_backend(user_id: int) -> str:
+    """Return 'opencode' if the user's current model is an OpenCode model, else 'agy'."""
+    from config import is_opencode_model
+    return "opencode" if is_opencode_model(get_user_model(user_id)) else "agy"
+
+
+def get_user_oc_model(user_id: int) -> str:
+    """Get the user's preferred OpenCode model."""
+    from config import OPENCODE_DEFAULT_MODEL
+    return user_oc_models.get(user_id, OPENCODE_DEFAULT_MODEL)
+
+
+def set_user_oc_model(user_id: int, model_name: str) -> None:
+    """Set the user's preferred OpenCode model without touching agy state."""
+    user_oc_models[user_id] = model_name
+    save_state()
+
+
+def get_user_oc_session(user_id: int) -> Optional[str]:
+    """Get the active OpenCode session ID for a user."""
+    return user_oc_sessions.get(user_id)
+
+
+def set_user_oc_session(user_id: int, session_id: str) -> None:
+    """Set the active OpenCode session ID for a user and save state."""
+    user_oc_sessions[user_id] = session_id
+    save_state()
+
+
+def reset_user_oc_session(user_id: int) -> None:
+    """Reset only the OpenCode session for a user."""
+    user_oc_sessions.pop(user_id, None)
+    save_state()
 
 
 # Initial load when module is imported

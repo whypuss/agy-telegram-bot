@@ -44,6 +44,7 @@ from config import (
     TEXT_BATCH_DELAY_SECONDS,
     MEDIA_BATCH_DELAY_SECONDS,
     CACHE_DIR,
+    is_opencode_model,
     is_authorized,
 )
 from formatter import (
@@ -68,8 +69,14 @@ from agent_runner import (
     get_user_conversation,
     reset_user_conversation,
     get_user_usage_summary,
+    get_last_backend,
     is_user_task_running,
     cancel_user_task,
+)
+from session_store import (
+    get_user_oc_session,
+    get_user_oc_model,
+    reset_user_oc_session,
 )
 from ui_components import (
     AVAILABLE_MODELS,
@@ -125,6 +132,38 @@ _pending_text_tasks: Dict[int, asyncio.Task] = {}
 # Buffer photo albums or multi-photo bursts
 _pending_photo_batches: Dict[str, dict] = {}
 _pending_photo_tasks: Dict[str, asyncio.Task] = {}
+
+# Corrections sent while a task is running: the running turn is cancelled
+# immediately and re-executed with the original task + all accumulated
+# corrections merged into one prompt, producing a single integrated answer.
+_user_original_prompts: Dict[int, str] = {}
+_user_corrections: Dict[int, List[str]] = {}
+_user_merged_upto: Dict[int, int] = {}
+
+
+def _begin_fresh_task(uid: int, prompt: str) -> None:
+    """Reset correction tracking when a brand-new task starts."""
+    _user_original_prompts[uid] = prompt
+    _user_corrections[uid] = []
+    _user_merged_upto[uid] = 0
+
+
+def _has_pending_corrections(uid: int) -> bool:
+    """True if corrections have arrived that no merged turn has consumed yet."""
+    return len(_user_corrections.get(uid, [])) > _user_merged_upto.get(uid, 0)
+
+
+async def _record_correction(update: Update, uid: int, text: str) -> None:
+    """Accumulate a correction, cancel the running turn so it re-merges now."""
+    corrections = _user_corrections.setdefault(uid, [])
+    corrections.append(text)
+    _user_original_prompts.setdefault(uid, text)
+    await cancel_user_task(uid)
+    await update.message.reply_text(
+        f"📝 已記錄第 {len(corrections)} 則修正，正在中止目前執行，"
+        f"並把原始任務與所有修正一併整合重新執行…",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -227,11 +266,12 @@ async def process_agent_turn(
     thread_id = getattr(update.message, "message_thread_id", None) if update.message else None
 
     current_model = get_user_model(uid)
+    backend_label = "💻 本地 OpenCode" if is_opencode_model(current_model) else "⚡ Antigravity"
 
     # Send initial status message
     status_msg = await context.bot.send_message(
         chat_id=chat.id,
-        text=f"⏳ *已接收請求，Agent 啟動中\\.\\.\\.*\n📌 模型: `{format_markdown_v2(current_model)}`",
+        text=f"⏳ *已接收請求，Agent 啟動中\\.\\.\\.*\n🔌 後端: {format_markdown_v2(backend_label)}\n📌 模型: `{format_markdown_v2(current_model)}`",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_to_message_id=original_message_id,
         message_thread_id=thread_id,
@@ -280,6 +320,7 @@ async def process_agent_turn(
             progress_block = "\n".join(progress_items)
             msg_text = (
                 f"⏳ *Agent 處理中\\.\\.\\.* \\({elapsed}\\)\n"
+                f"🔌 後端: {format_markdown_v2(backend_label)}\n"
                 f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
                 f"📋 *執行過程：*\n"
                 f"{format_markdown_v2(progress_block)}"
@@ -294,13 +335,14 @@ async def process_agent_turn(
                 # Fallback to plain text on Markdown edit error
                 try:
                     await status_msg.edit_text(
-                        text=f"⏳ Agent 處理中... ({elapsed})\n📌 模型: {current_model}\n\n📋 執行過程：\n{progress_block}",
+                        text=f"⏳ Agent 處理中... ({elapsed})\n🔌 後端: {backend_label}\n📌 模型: {current_model}\n\n📋 執行過程：\n{progress_block}",
                         reply_markup=build_cancel_keyboard(),
                     )
                 except Exception:
                     pass
 
     # Run agent execution
+    cancelled_by_correction = False
     try:
         reply_text, new_conv_id, turn_usage = await run_agent_turn(
             prompt=prompt,
@@ -308,7 +350,8 @@ async def process_agent_turn(
             on_progress=on_progress,
         )
     except asyncio.CancelledError:
-        reply_text = "🛑 任務已由使用者中止。"
+        cancelled_by_correction = _has_pending_corrections(uid)
+        reply_text = "" if cancelled_by_correction else "🛑 任務已由使用者中止。"
         turn_usage = None
     except asyncio.TimeoutError:
         reply_text = f"⏰ Agent 執行超時（{AGY_TIMEOUT} 秒）。\n請簡化需求或使用 /reset 重置會話。"
@@ -321,89 +364,136 @@ async def process_agent_turn(
         typing_active = False
         typing_task.cancel()
 
-    # Update status message to Completed with token metrics & preserved process trace
-    elapsed_total = format_elapsed(int(time.time() - start_time))
-    token_str = ""
-    if turn_usage and turn_usage.get("total_tokens"):
-        tokens = turn_usage["total_tokens"]
-        token_str = f" · {tokens:,} tokens"
-
-    final_items = []
-    for it in progress_items:
-        if it.startswith("▶ "):
-            final_items.append(it.replace("▶ ", "✓ "))
-        else:
-            final_items.append(it)
-
-    if final_items:
-        completed_block = "\n".join(final_items)
-        final_status_text = (
-            f"✅ *任務完成* \\(耗時 {elapsed_total}{format_markdown_v2(token_str)}\\)\n"
-            f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
-            f"📋 *執行過程：*\n"
-            f"{format_markdown_v2(completed_block)}"
-        )
-        plain_final_text = (
-            f"✅ 任務完成 (耗時 {elapsed_total}{token_str})\n"
-            f"📌 模型: {current_model}\n\n"
-            f"📋 執行過程：\n"
-            f"{completed_block}"
-        )
-    else:
-        final_status_text = f"✅ *任務完成* \\(耗時 {elapsed_total}{format_markdown_v2(token_str)}\\)"
-        plain_final_text = f"✅ 任務完成 (耗時 {elapsed_total}{token_str})"
-
-    try:
-        await status_msg.edit_text(
-            text=final_status_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=None,
-        )
-    except Exception:
+    if cancelled_by_correction:
+        # Turn was interrupted by an incoming correction — skip the final
+        # answer; the merged re-run below delivers the integrated result.
         try:
             await status_msg.edit_text(
-                text=plain_final_text,
+                text="🔄 已收到修正指示，正在整合原始任務與所有修正重新執行…",
                 reply_markup=None,
             )
         except Exception:
             pass
+    else:
+        # Update status message to Completed with token metrics & preserved process trace
+        elapsed_total = format_elapsed(int(time.time() - start_time))
+        served_backend = get_last_backend(uid)
+        if served_backend == "agy+fallback":
+            served_label = "🔁 OpenCode 備援"
+        elif served_backend == "opencode":
+            served_label = "💻 本地 OpenCode"
+        else:
+            served_label = "⚡ Antigravity"
+        token_str = ""
+        if turn_usage and turn_usage.get("total_tokens"):
+            tokens = turn_usage["total_tokens"]
+            token_str = f" · {tokens:,} tokens"
 
-    # Append usage footer directly to the reply text if available
-    final_reply_text = reply_text
-    if turn_usage and turn_usage.get("total_tokens"):
-        tokens = turn_usage["total_tokens"]
-        in_tok = turn_usage.get("input_tokens", 0)
-        out_tok = turn_usage.get("output_tokens", 0)
-        dur = turn_usage.get("duration_seconds")
-        # Ensure single turn duration is displayed rather than lifetime
-        if not dur or dur > 3600:
-            dur = max(0.1, time.time() - start_time)
-        usage_footer = f"\n\n---\n⏱️ `{dur:.1f}s` · 📊 `{tokens:,}` tokens (📥 `{in_tok:,}` / 📤 `{out_tok:,}`)"
-        
-        # High token warning
-        user_usage = get_user_usage_summary(uid)
-        session_tok = ((user_usage or {}).get("session") or {}).get("total_tokens", 0)
-        if session_tok > 180000:
-            usage_footer += f"\n💡 *提示: 當前會話累積達 `{session_tok:,}` tokens，建議執行 /compact 壓縮上下文以維持最佳反應速度。*"
+        final_items = []
+        for it in progress_items:
+            if it.startswith("▶ "):
+                final_items.append(it.replace("▶ ", "✓ "))
+            else:
+                final_items.append(it)
 
-        final_reply_text = f"{reply_text}{usage_footer}"
+        if final_items:
+            completed_block = "\n".join(final_items)
+            final_status_text = (
+                f"✅ *任務完成* \\(耗時 {elapsed_total}{format_markdown_v2(token_str)}\\)\n"
+                f"🔌 後端: {format_markdown_v2(served_label)}\n"
+                f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
+                f"📋 *執行過程：*\n"
+                f"{format_markdown_v2(completed_block)}"
+            )
+            plain_final_text = (
+                f"✅ 任務完成 (耗時 {elapsed_total}{token_str})\n"
+                f"🔌 後端: {served_label}\n"
+                f"📌 模型: {current_model}\n\n"
+                f"📋 執行過程：\n"
+                f"{completed_block}"
+            )
+        else:
+            final_status_text = f"✅ *任務完成* \\(耗時 {elapsed_total}{format_markdown_v2(token_str)}\\)"
+            plain_final_text = f"✅ 任務完成 (耗時 {elapsed_total}{token_str})"
 
-    # Send response text
-    await send_formatted_reply(
-        update=update,
-        context=context,
-        text=final_reply_text,
-        reply_to_message_id=original_message_id,
-        thread_id=thread_id,
-    )
+        try:
+            await status_msg.edit_text(
+                text=final_status_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=None,
+            )
+        except Exception:
+            try:
+                await status_msg.edit_text(
+                    text=plain_final_text,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
 
-    # Send any detected generated files / images
-    await send_detected_media(
-        update=update,
-        context=context,
-        response_text=reply_text,
-        thread_id=thread_id,
-    )
+        # Append usage footer directly to the reply text if available
+        final_reply_text = reply_text
+        if turn_usage and turn_usage.get("total_tokens"):
+            tokens = turn_usage["total_tokens"]
+            in_tok = turn_usage.get("input_tokens", 0)
+            out_tok = turn_usage.get("output_tokens", 0)
+            dur = turn_usage.get("duration_seconds")
+            # Ensure single turn duration is displayed rather than lifetime
+            if not dur or dur > 3600:
+                dur = max(0.1, time.time() - start_time)
+            usage_footer = f"\n\n---\n⏱️ `{dur:.1f}s` · 📊 `{tokens:,}` tokens (📥 `{in_tok:,}` / 📤 `{out_tok:,}`)"
+
+            # High token warning
+            user_usage = get_user_usage_summary(uid)
+            session_tok = ((user_usage or {}).get("session") or {}).get("total_tokens", 0)
+            if session_tok > 180000:
+                usage_footer += f"\n💡 *提示: 當前會話累積達 `{session_tok:,}` tokens，建議執行 /compact 壓縮上下文以維持最佳反應速度。*"
+
+            final_reply_text = f"{reply_text}{usage_footer}"
+
+        # Send response text
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text=final_reply_text,
+            reply_to_message_id=original_message_id,
+            thread_id=thread_id,
+        )
+
+        # Send any detected generated files / images
+        await send_detected_media(
+            update=update,
+            context=context,
+            response_text=reply_text,
+            thread_id=thread_id,
+        )
+
+    # If corrections arrived while this task was running, re-run immediately:
+    # merge the original task with every accumulated correction into ONE
+    # prompt so the agent outputs a single integrated final answer.
+    if _has_pending_corrections(uid):
+        corrections = _user_corrections[uid]
+        _user_merged_upto[uid] = len(corrections)
+        original_prompt = _user_original_prompts.get(uid) or prompt
+        correction_block = "\n".join(
+            f"{idx}. {text}" for idx, text in enumerate(corrections, 1)
+        )
+        merged_prompt = (
+            f"【原始任務】\n{original_prompt}\n\n"
+            f"【任務執行期間使用者追加的修正／補充指示（共 {len(corrections)} 則，按時間順序）】\n"
+            f"{correction_block}\n\n"
+            "請綜合考量以上全部內容，輸出一個整合了所有輸入的最終答案。"
+            "若後續修正與原始任務有衝突，以較新的修正為準。"
+        )
+        # Yield control so the task can be marked as "not running" before
+        # starting the merged follow-up turn (prevents re-queuing).
+        await asyncio.sleep(0)
+        await process_agent_turn(
+            update=update,
+            context=context,
+            prompt=merged_prompt,
+            original_message_id=original_message_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +550,7 @@ def clean_mention(text: str, bot_username: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle text message with client-side split batching."""
+    """Handle text message with client-side split batching and Hermes-style queueing."""
     if not update.message or not update.message.text:
         return
 
@@ -480,6 +570,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     cleaned_text = clean_mention(raw_text, bot_username)
 
     if not cleaned_text:
+        return
+
+    # If a task is running (or corrections are pending a merged re-run), treat
+    # the message as a correction: cancel the current execution immediately and
+    # re-run with the original task + all corrections merged into one answer.
+    if is_user_task_running(uid) or _has_pending_corrections(uid):
+        await _record_correction(update, uid, cleaned_text)
         return
 
     # Buffer rapid text chunks for this user
@@ -502,6 +599,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         batch = _pending_text_batches.pop(uid, None)
         _pending_text_tasks.pop(uid, None)
         if batch:
+            # Re-check at flush time: a task may have started while batching
+            if is_user_task_running(uid) or _has_pending_corrections(uid):
+                await _record_correction(batch["update"], uid, batch["text"])
+                return
+            _begin_fresh_task(uid, batch["text"])
             await process_agent_turn(
                 update=batch["update"],
                 context=context,
@@ -567,6 +669,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 paths_str = "\n".join(f"- {p}" for p in paths)
                 prompt = f"[📎 使用者傳送了相簿 ({len(paths)} 張圖片):\n{paths_str}]\n{cap}".strip()
 
+            _begin_fresh_task(uid, prompt)
             await process_agent_turn(
                 update=batch["update"],
                 context=context,
@@ -596,6 +699,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     saved_path = await save_voice(update.message.voice)
     prompt = f"[🎙️ 使用者傳送了語音音檔: {saved_path}]\n請聆聽/分析該語音內容並給予回覆。"
 
+    _begin_fresh_task(uid, prompt)
     await process_agent_turn(
         update=update,
         context=context,
@@ -620,6 +724,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     caption = clean_mention(update.message.caption or "", context.bot.username)
     prompt = f"[🎵 使用者傳送了音樂/音訊檔案: {saved_path} (名稱: {update.message.audio.file_name or 'audio'})]\n{caption}".strip()
 
+    _begin_fresh_task(uid, prompt)
     await process_agent_turn(
         update=update,
         context=context,
@@ -649,6 +754,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     caption = clean_mention(update.message.caption or "", context.bot.username)
     prompt = f"[📁 使用者傳送了文件檔案: {saved_path} (原始檔名: {doc.file_name or 'file'})]\n{caption}".strip()
 
+    _begin_fresh_task(uid, prompt)
     await process_agent_turn(
         update=update,
         context=context,
@@ -681,6 +787,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"地圖連結: https://www.google.com/maps/search/?api=1&query={loc.latitude},{loc.longitude}"
     )
 
+    _begin_fresh_task(uid, prompt)
     await process_agent_turn(
         update=update,
         context=context,
@@ -708,15 +815,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     current_model = get_user_model(uid)
+    current_backend = "💻 本地 OpenCode" if is_opencode_model(current_model) else "⚡ Antigravity"
     text = (
         f"👋 你好 **{user.first_name}**！\n\n"
         f"我是你的 **Antigravity AI Agent** 遠端助手。\n"
         f"直接傳送文字、圖片、語音或程式碼文件，我將為你處理。\n\n"
+        f"🔌 **目前後端：** {current_backend}\n"
         f"🧠 **目前模型：** `{current_model}`\n"
+        f"🔁 **自動備援：** Antigravity 失敗時自動切換本地 OpenCode\n"
         f"🆔 **你的 User ID：** `{uid}`\n\n"
         f"📌 **常用指令：**\n"
         f"• `/usage` — 📊 查看 Token 用量與資源消耗統計\n"
-        f"• `/model` — 🧠 互動式切換 AI 模型\n"
+        f"• `/model` — 🧠 互動式切換 AI 模型（含 OpenCode 模型）\n"
         f"• `/compact` — 📦 壓縮上下文（瘦身並保留關鍵記憶）\n"
         f"• `/reset` — 🔄 重置會話記憶（開新對話）\n"
         f"• `/status` — 📈 查看目前運作狀態\n"
@@ -745,20 +855,22 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         raw_model = " ".join(args).strip()
         new_model = resolve_model_alias(raw_model)
         set_user_model(uid, new_model)
+        new_backend = "💻 本地 OpenCode" if is_opencode_model(new_model) else "⚡ Antigravity"
         await send_formatted_reply(
             update=update,
             context=context,
-            text=f"✅ **模型已切換為：** `{new_model}`\n會話已自動重置為全新對話。",
+            text=f"✅ **模型已切換為：** `{new_model}`\n🔌 **後端：** {new_backend}\n會話已自動重置為全新對話。",
             reply_to_message_id=update.message.message_id,
         )
         return
 
-    # Show interactive picker
+    # Show interactive picker (Antigravity + OpenCode sections)
     kb, page, total = build_model_keyboard(current_model, page=0)
     await update.message.reply_text(
         f"🧠 AI 模型選擇器\n\n"
         f"目前使用模型: {current_model}\n"
-        f"點擊下方按鈕可立即切換模型（切換後將自動開啟新會話）：",
+        f"🔌 後端: {'💻 本地 OpenCode' if is_opencode_model(current_model) else '⚡ Antigravity'}\n"
+        f"點擊下方按鈕可立即切換模型（切換後將自動開啟新會話；選 (OC) 模型即切換到本地 OpenCode 後端）：",
         reply_markup=kb,
     )
 
@@ -770,10 +882,14 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     reset_user_conversation(uid)
+    reset_user_oc_session(uid)
+    _user_corrections[uid] = []
+    _user_merged_upto[uid] = 0
+    _user_original_prompts.pop(uid, None)
     await send_formatted_reply(
         update=update,
         context=context,
-        text="🔄 **對話記憶已重置**\n下次傳送訊息將會開啟全新的 Agent Session。",
+        text="🔄 **對話記憶已重置**（Antigravity + OpenCode 會話皆已清空）\n下次傳送訊息將會開啟全新的會話。",
         reply_to_message_id=update.message.message_id,
     )
 
@@ -876,6 +992,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     current_model = get_user_model(uid)
     conv_id = get_user_conversation(uid)
+    oc_session_id = get_user_oc_session(uid)
+    oc_model = get_user_oc_model(uid)
     is_running = is_user_task_running(uid)
     uptime_str = get_uptime_string()
     usage_summary = get_user_usage_summary(uid)
@@ -890,6 +1008,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         workspace_dir=WORKSPACE_DIR,
         proxy_url=PROXY_URL or None,
         usage_stats=usage_summary,
+        oc_session_id=oc_session_id,
+        oc_model=oc_model,
     )
     await send_formatted_reply(
         update=update,
@@ -905,6 +1025,9 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not is_authorized(uid):
         return
 
+    # Clear pending corrections first so the cancelled turn does not re-merge
+    _user_corrections[uid] = []
+    _user_merged_upto[uid] = 0
     cancelled = await cancel_user_task(uid)
     if cancelled:
         await send_formatted_reply(
@@ -920,6 +1043,57 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             text="ℹ️ 目前沒有正在執行的任務。",
             reply_to_message_id=update.message.message_id,
         )
+
+
+async def cmd_steer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /steer <text> — cancel current task and send correction immediately."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    args = context.args
+    if not args:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="⚠️ 用法：`/steer <修正內容>`\n\n"
+                 "作用：終止目前任務並立即發送修正指示。\n"
+                 "例：`/steer 不要用 pandas，改用 csv 模組`",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    steer_text = " ".join(args).strip()
+    if not steer_text:
+        return
+
+    # Clear accumulated corrections first so the cancelled turn does not
+    # re-merge, then cancel the running task (superseded by the steer).
+    _begin_fresh_task(uid, steer_text)
+    was_running = await cancel_user_task(uid)
+
+    if was_running:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="🛑 已中止當前任務，準備發送修正指示…",
+            reply_to_message_id=update.message.message_id,
+        )
+    else:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="⚡ 目前沒有正在執行的任務，直接發送修正指示。",
+            reply_to_message_id=update.message.message_id,
+        )
+
+    # Start a fresh turn with the correction
+    await process_agent_turn(
+        update=update,
+        context=context,
+        prompt=steer_text,
+        original_message_id=update.message.message_id,
+    )
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1047,8 +1221,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("set_model:"):
         model_name = data.split(":", 1)[1]
         set_user_model(uid, model_name)
+        picked_backend = "💻 本地 OpenCode" if is_opencode_model(model_name) else "⚡ Antigravity"
         await query.edit_message_text(
             f"✅ 模型已成功切換為：{model_name}\n"
+            f"🔌 後端：{picked_backend}\n"
             f"對話記憶已重置，隨時傳送訊息即可開始新對話！",
         )
 
@@ -1062,6 +1238,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.delete()
 
     elif data == "cancel_task":
+        _user_corrections[uid] = []
+        _user_merged_upto[uid] = 0
         cancelled = await cancel_user_task(uid)
         if cancelled:
             await query.edit_message_text("🛑 任務已被使用者中止。")
@@ -1202,6 +1380,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["reset", "new"], cmd_reset))
     app.add_handler(CommandHandler(["status"], cmd_status))
     app.add_handler(CommandHandler(["cancel", "stop"], cmd_cancel))
+    app.add_handler(CommandHandler(["steer"], cmd_steer))
     app.add_handler(CommandHandler(["clear"], cmd_clear))
     app.add_handler(CommandHandler(["help"], cmd_help))
 
@@ -1220,7 +1399,6 @@ def main() -> None:
     logger.info("📂 工作目錄: %s", WORKSPACE_DIR)
     logger.info("🧠 預設模型: %s", DEFAULT_MODEL)
     logger.info("👥 授權使用者: %s", ALLOWED_USER_IDS or "(所有人)")
-
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=False,
