@@ -77,6 +77,7 @@ from session_store import (
     get_user_oc_session,
     get_user_oc_model,
     reset_user_oc_session,
+    clear_transcript,
 )
 from ui_components import (
     AVAILABLE_MODELS,
@@ -859,7 +860,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_formatted_reply(
             update=update,
             context=context,
-            text=f"✅ **模型已切換為：** `{new_model}`\n🔌 **後端：** {new_backend}\n會話已自動重置為全新對話。",
+            text=f"✅ **模型已切換為：** `{new_model}`\n🔌 **後端：** {new_backend}\n對話記憶已保留；若跨後端切換，近期對話會自動交接至新後端，記憶無縫連續。",
             reply_to_message_id=update.message.message_id,
         )
         return
@@ -870,7 +871,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"🧠 AI 模型選擇器\n\n"
         f"目前使用模型: {current_model}\n"
         f"🔌 後端: {'💻 本地 OpenCode' if is_opencode_model(current_model) else '⚡ Antigravity'}\n"
-        f"點擊下方按鈕可立即切換模型（切換後將自動開啟新會話；選 (OC) 模型即切換到本地 OpenCode 後端）：",
+        f"點擊下方按鈕可立即切換模型（切換後對話記憶保留，跨後端會自動交接近期上下文；選 (OC) 模型即切換到本地 OpenCode 後端）：",
         reply_markup=kb,
     )
 
@@ -883,6 +884,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     reset_user_conversation(uid)
     reset_user_oc_session(uid)
+    clear_transcript(uid)
     _user_corrections[uid] = []
     _user_merged_upto[uid] = 0
     _user_original_prompts.pop(uid, None)
@@ -1225,7 +1227,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(
             f"✅ 模型已成功切換為：{model_name}\n"
             f"🔌 後端：{picked_backend}\n"
-            f"對話記憶已重置，隨時傳送訊息即可開始新對話！",
+            f"對話記憶已保留；若跨後端切換，近期對話會自動交接，記憶無縫連續！",
         )
 
     elif data.startswith("page_model:"):

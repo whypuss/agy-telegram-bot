@@ -40,11 +40,22 @@ user_last_turn_usage: Dict[int, dict] = {}
 # User ID -> Lifetime Usage dict (total across all sessions since bot startup)
 user_lifetime_usage: Dict[int, dict] = {}
 
+# User ID -> Rolling cross-backend transcript. Each entry:
+# {"role": "user"|"assistant", "backend": "agy"|"opencode", "text": str}
+# Used to hand off recent context when the user switches backends
+# (native sessions of agy and OpenCode are incompatible and isolated).
+user_transcripts: Dict[int, list] = {}
+
+TRANSCRIPT_MAX_ENTRIES = 12
+TRANSCRIPT_TEXT_LIMIT = 1000
+
+_BACKEND_LABELS = {"agy": "Antigravity", "opencode": "本地 OpenCode"}
+
 
 def load_state() -> None:
     """Load session state from disk on startup."""
     global user_conversations, user_models, user_session_usage, user_last_turn_usage, user_lifetime_usage
-    global user_oc_sessions, user_oc_models
+    global user_oc_sessions, user_oc_models, user_transcripts
     with _state_lock:
         if not STATE_FILE.exists():
             logger.info("No existing state file found at %s. Initializing fresh state.", STATE_FILE)
@@ -73,6 +84,7 @@ def load_state() -> None:
             user_session_usage = _int_dict(data.get("session_usage", {}))
             user_last_turn_usage = _int_dict(data.get("last_turn_usage", {}))
             user_lifetime_usage = _int_dict(data.get("lifetime_usage", {}))
+            user_transcripts = _int_dict(data.get("transcripts", {}))
 
             logger.info(
                 "Successfully loaded state from %s: %d conversations, %d models",
@@ -95,6 +107,7 @@ def save_state() -> None:
             "session_usage": {str(k): v for k, v in user_session_usage.items()},
             "last_turn_usage": {str(k): v for k, v in user_last_turn_usage.items()},
             "lifetime_usage": {str(k): v for k, v in user_lifetime_usage.items()},
+            "transcripts": {str(k): v for k, v in user_transcripts.items()},
         }
 
         try:
@@ -118,13 +131,70 @@ def get_user_model(user_id: int) -> str:
 
 
 def set_user_model(user_id: int, model_name: str) -> None:
-    """Set the model for a user and reset their conversation context."""
+    """Set the model for a user WITHOUT wiping conversation memory.
+
+    Both backends' native sessions (agy conversation ID and OpenCode session
+    ID) are kept intact across model/backend switches so switching back
+    resumes the previous session. Context gaps created while the other
+    backend was active are bridged automatically by the rolling transcript
+    (see build_handoff_context), ensuring memory continuity when users
+    switch models due to quota exhaustion.
+    """
     user_models[user_id] = model_name
-    reset_user_conversation(user_id)
     save_state()
-    user_session_usage.pop(user_id, None)
-    user_last_turn_usage.pop(user_id, None)
+
+
+def append_transcript(user_id: int, role: str, backend: str, text: str) -> None:
+    """Append one entry to the user's rolling cross-backend transcript."""
+    text = (text or "").strip()
+    if not text:
+        return
+    if len(text) > TRANSCRIPT_TEXT_LIMIT:
+        text = text[:TRANSCRIPT_TEXT_LIMIT] + " …"
+    entries = user_transcripts.setdefault(user_id, [])
+    entries.append({"role": role, "backend": backend, "text": text})
+    while len(entries) > TRANSCRIPT_MAX_ENTRIES:
+        entries.pop(0)
     save_state()
+
+
+def clear_transcript(user_id: int) -> None:
+    """Drop the rolling transcript for a user (used by /reset)."""
+    user_transcripts.pop(user_id, None)
+    save_state()
+
+
+def build_handoff_context(user_id: int, current_backend: str) -> Optional[str]:
+    """Build a context-handoff block covering turns the current backend missed.
+
+    Returns None when the current backend has already seen every recorded
+    turn (steady state), so nothing extra is injected into the prompt.
+    """
+    entries = user_transcripts.get(user_id) or []
+    if not entries:
+        return None
+
+    last_own = -1
+    for i in range(len(entries) - 1, -1, -1):
+        if entries[i].get("backend") == current_backend:
+            last_own = i
+            break
+    gap = entries[last_own + 1:]
+    if not gap:
+        return None
+
+    lines = []
+    for e in gap:
+        speaker = "用戶" if e.get("role") == "user" else "助手"
+        label = _BACKEND_LABELS.get(e.get("backend"), e.get("backend") or "未知後端")
+        lines.append(f"[{speaker} · {label}]: {e.get('text', '')}")
+
+    return (
+        "【上下文交接 Context Handoff】\n"
+        "以下是你與使用者此前在另一後端的近期對話紀錄（因後端/模型切換，你無法直接讀取該會話）。"
+        "請將其視為已發生的對話歷史，無縫承接，確保記憶連續；回答時不要重複已完成的事項：\n\n"
+        + "\n\n".join(lines)
+    )
 
 
 

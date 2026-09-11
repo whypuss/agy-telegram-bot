@@ -36,6 +36,8 @@ from session_store import (
     get_user_oc_session,
     set_user_oc_session,
     get_user_oc_model,
+    append_transcript,
+    build_handoff_context,
     save_state,
 )
 from memory_manager import build_memory_context, monitor_and_extract
@@ -145,6 +147,12 @@ async def run_opencode_turn(
         mem_ctx = build_memory_context()
         if mem_ctx:
             effective_prompt = f"{mem_ctx}\n{prompt}"
+
+    # Cross-backend handoff: inject recent turns this backend missed while the
+    # other backend was serving (e.g. user switched model after quota ran out).
+    handoff_ctx = build_handoff_context(user_id, "opencode")
+    if handoff_ctx:
+        effective_prompt = f"{handoff_ctx}\n\n{effective_prompt}"
     if AGENT_SYSTEM_PROMPT:
         effective_prompt = f"[系統指示: {AGENT_SYSTEM_PROMPT}]\n{effective_prompt}"
 
@@ -359,5 +367,8 @@ async def run_opencode_turn(
             asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
         except Exception:
             pass
+        # Record into the rolling cross-backend transcript for handoff
+        append_transcript(user_id, "user", "opencode", prompt)
+        append_transcript(user_id, "assistant", "opencode", response_text)
 
     return response_text, new_session_id, turn_usage

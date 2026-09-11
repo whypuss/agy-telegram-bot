@@ -40,6 +40,8 @@ from session_store import (
     set_user_conversation,
     reset_user_conversation,
     get_user_usage_summary,
+    append_transcript,
+    build_handoff_context,
     save_state,
 )
 from memory_manager import build_memory_context, monitor_and_extract, add_entry
@@ -248,6 +250,13 @@ async def _run_agy_turn(
         mem_ctx = build_memory_context()
         if mem_ctx:
             effective_prompt = f"{mem_ctx}\n{prompt}"
+
+    # Cross-backend handoff: if the user recently chatted on the other backend
+    # (e.g. switched model after quota exhaustion), inject those missed turns
+    # so this backend continues seamlessly instead of losing memory.
+    handoff_ctx = build_handoff_context(user_id, "agy")
+    if handoff_ctx:
+        effective_prompt = f"{handoff_ctx}\n\n{effective_prompt}"
 
     cmd = [AGY_PATH]
     cmd.extend(["--print-timeout", f"{AGY_TIMEOUT}s"])
@@ -526,6 +535,9 @@ async def _run_agy_turn(
             asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
         except Exception:
             pass
+        # Record into the rolling cross-backend transcript for handoff
+        append_transcript(user_id, "user", "agy", prompt)
+        append_transcript(user_id, "assistant", "agy", response_text)
 
     return response_text, new_conv_id, turn_usage
 

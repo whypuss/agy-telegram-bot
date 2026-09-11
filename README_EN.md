@@ -53,7 +53,8 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
 - **Local OpenCode Models**: Runs local models via `opencode run --format json` in non-interactive mode, streaming NDJSON events for real-time tool-call progress and token accounting — never relying on the global `opencode.json` default (which may point at a dead proxy).
 - **Seamless Session Continuity**: Per-user OpenCode session IDs are persisted (`opencode run -s <id>`), so conversation context survives restarts.
 - **Auto-Fallback**: When the Antigravity backend fails, execution automatically falls back to local OpenCode; the status card labels the actual serving backend (⚡ Antigravity / 💻 Local OpenCode / 🔁 OpenCode Fallback).
-- **One-Click Switching**: The `/model` picker includes a dedicated (OC) local-model section — tap to switch backends and start a fresh session instantly.
+- **One-Click Switching**: The `/model` picker includes a dedicated (OC) local-model section — tap to switch backends instantly.
+- **Cross-Backend Memory Continuity (Context Handoff)**: Switching models/backends **no longer wipes the conversation** — both native sessions are preserved and resume when you switch back; a rolling transcript automatically injects the other backend's recent turns into the new backend, so switching models due to quota exhaustion never loses memory.
 
 ### 9. 📝 Mid-Run Correction Steering
 - **Instant Corrections**: Send a text message while a task is running and the bot **immediately cancels the current execution**, then re-runs with the original task plus all corrections merged — no waiting for the first run to finish.

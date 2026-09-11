@@ -53,7 +53,8 @@
 - **本地 OpenCode 模型接入**：透過 `opencode run --format json` 非互動模式執行本地模型，NDJSON 串流即時解析工具調用與 Token 用量，無需依賴全域 `opencode.json` 預設（避免指向失效代理）。
 - **會話無縫承接**：每個使用者嘅 OpenCode Session ID 獨立持久化（`opencode run -s <id>`），跨重啟對話上下文不丟失。
 - **自動備援 (Auto-Fallback)**：當 Antigravity 後端失敗時，自動切換本地 OpenCode 接續執行，狀態卡會標示實際服務後端（⚡ Antigravity / 💻 本地 OpenCode / 🔁 OpenCode 備援）。
-- **一鍵切換**：`/model` 選單內建 (OC) 本地模型分區，點擊即切換後端並自動開啟新會話。
+- **一鍵切換**：`/model` 選單內建 (OC) 本地模型分區，點擊即切換後端。
+- **跨後端記憶連續 (Context Handoff)**：切換模型/後端**唔會再清空會話**——兩邊 native session 各自保留，切返轉頭可無縫恢復；Bot 內部維護滾動對話紀錄（rolling transcript），切換後自動把對方後端嘅近期對話注入新後端，因用量耗盡而切換模型都唔會再丟失記憶。
 
 ### 9. 📝 執行中即時修正整合 (Mid-Run Correction Steering)
 - **修正即時生效**：任務運行途中直接傳送文字訊息，Bot 會**立即中止目前執行**，並把「原始任務 + 所有修正」合併重新執行——唔使等第一次跑完。
