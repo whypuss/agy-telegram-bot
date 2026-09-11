@@ -132,6 +132,7 @@ async def run_opencode_turn(
     user_id: int,
     model: Optional[str] = None,
     on_progress: Optional[Callable[[str], Coroutine]] = None,
+    _retried: bool = False,
 ) -> Tuple[str, Optional[str], Optional[dict]]:
     """
     Execute a turn with the local OpenCode backend.
@@ -263,7 +264,16 @@ async def run_opencode_turn(
                         pass
             elif etype == "error":
                 err = event.get("error") or {}
-                msg = err.get("message") if isinstance(err, dict) else str(err)
+                msg = None
+                if isinstance(err, dict):
+                    data = err.get("data") or {}
+                    msg = (
+                        err.get("message")
+                        or (data.get("message") if isinstance(data, dict) else None)
+                        or err.get("name")
+                    )
+                else:
+                    msg = str(err)
                 if msg:
                     error_events.append(str(msg)[:500])
 
@@ -353,11 +363,42 @@ async def run_opencode_turn(
     if not response_text:
         detail = "; ".join(error_events) or "\n".join(stderr_lines[-5:])
         if proc.returncode not in (0, None) or error_events:
+            # One automatic retry for transient provider errors (rate limit,
+            # quota hiccups) — but never after a deliberate cancellation.
+            if not _retried and user_id not in _oc_cancelled_users:
+                logger.warning(
+                    "opencode exited %s for user %s with no output (detail: %s); retrying once",
+                    proc.returncode, user_id, (detail.strip() or "<none>")[:300],
+                )
+                if on_progress:
+                    try:
+                        await on_progress("🔁 OpenCode 無輸出異常退出，自動重試一次...")
+                    except Exception:
+                        pass
+                return await run_opencode_turn(
+                    prompt=prompt,
+                    user_id=user_id,
+                    model=model,
+                    on_progress=on_progress,
+                    _retried=True,
+                )
+            logger.warning(
+                "opencode failed for user %s: exit=%s error_events=%s stderr_tail=%s",
+                user_id, proc.returncode, error_events[-3:], stderr_lines[-5:],
+            )
             lines = [f"❌ **OpenCode 執行失敗 (Exit Code: {proc.returncode})**"]
             if detail.strip():
                 lines.append(f"\n🔍 **錯誤詳情：**\n```\n{detail.strip()[:800]}\n```")
+                if any(k in detail.lower() for k in ("invalid", "context", "length", "too long", "token")):
+                    lines.append(
+                        "\n💡 可能係會話上下文超出該模型嘅上下文上限，"
+                        "建議 /model 切換大上下文模型後再試。"
+                    )
             else:
-                lines.append("\n⚠️ 本地進程未返回詳細錯誤，可重試或切換模型後再試。")
+                lines.append(
+                    "\n⚠️ 本地進程未返回詳細錯誤（已自動重試一次）。\n"
+                    "💡 免費模型常因限流/額度波動失敗，可稍後重試或用 /model 切換其他模型。"
+                )
             response_text = "\n".join(lines)
         else:
             response_text = "（OpenCode 回覆為空）"

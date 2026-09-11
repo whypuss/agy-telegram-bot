@@ -15,7 +15,7 @@ import os
 import re
 import signal
 import time
-from typing import Callable, Coroutine, Dict, Optional, Tuple
+from typing import Callable, Coroutine, Dict, List, Optional, Tuple
 
 from config import (
     AGY_PATH,
@@ -23,6 +23,7 @@ from config import (
     DEFAULT_MODEL,
     WORKSPACE_DIR,
     AGENT_SYSTEM_PROMPT,
+    OPENCODE_DEFAULT_MODEL,
     is_opencode_model,
 )
 
@@ -42,9 +43,12 @@ from session_store import (
     get_user_usage_summary,
     append_transcript,
     build_handoff_context,
+    get_user_oc_session,
+    reset_user_oc_session,
+    clear_transcript,
     save_state,
 )
-from memory_manager import build_memory_context, monitor_and_extract, add_entry
+from memory_manager import build_memory_context, monitor_and_extract, add_entry, add_session_summary
 
 # User ID -> Active subprocess
 _active_processes: Dict[int, asyncio.subprocess.Process] = {}
@@ -241,6 +245,10 @@ async def _run_agy_turn(
         (response_text, new_conversation_id, turn_usage)
     """
     model = get_user_model(user_id)
+    # Guard: never pass an OpenCode model id to the agy CLI (can happen when
+    # compacting an agy session while the user's active model is OpenCode).
+    if is_opencode_model(model):
+        model = DEFAULT_MODEL
     conv_id = get_user_conversation(user_id)
 
     # Hermes Frozen Snapshot Pattern:
@@ -590,21 +598,38 @@ async def compact_user_conversation(
     """
     Compress active conversation context into a structured summary
     and seamlessly seed a fresh conversation session.
-    
+
+    Cross-backend aware: the summary is generated on the backend that
+    actually holds the session (which may be the OTHER backend after a
+    model switch), then the fresh session is seeded on the CURRENT backend
+    — so /compact also migrates memory across backends.
+
     Returns:
         (success, message/summary, old_total_tokens, new_total_tokens)
     """
-    conv_id = get_user_conversation(user_id)
-    if not conv_id:
+    oc_mode = is_opencode_model(get_user_model(user_id))
+    agy_conv = get_user_conversation(user_id)
+    oc_sess = get_user_oc_session(user_id)
+
+    # Pick the backend that actually holds memory as the summary source.
+    if oc_mode:
+        source = "opencode" if oc_sess else ("agy" if agy_conv else None)
+    else:
+        source = "agy" if agy_conv else ("opencode" if oc_sess else None)
+
+    if source is None:
         return False, "目前尚未建立任何會話記憶，無需壓縮。", 0, 0
-    
+
+    oc_model_arg = get_user_model(user_id) if oc_mode else None
+
     old_session = user_session_usage.get(user_id, {})
     old_tokens = old_session.get("total_tokens", 0)
-    
+
+    source_label = "本地 OpenCode" if source == "opencode" else "Antigravity"
     if on_progress:
-        await on_progress("🧠 正在分析與提煉當前會話核心記憶...")
-        
-    # 1. Ask current conversation to generate structured summary
+        await on_progress(f"🧠 正在從 {source_label} 會話分析與提煉核心記憶...")
+
+    # 1. Ask the SOURCE backend (the one holding the session) to summarize
     summary_prompt = (
         "【系統指令：請為當前會話生成結構化壓縮記憶 (Context Summary)】\n"
         "請對本會話的所有歷史交互、已完成的任務與代碼變更、關鍵架構與技術決策、當前系統運行狀態，以及後續待辦事項，進行高密度、條理清晰的繁體中文總結。\n"
@@ -615,42 +640,82 @@ async def compact_user_conversation(
         "### 🎯 後續待辦與下一步規劃\n"
         "請直接輸出總結內容，勿帶客套話。"
     )
-    
-    summary_reply, _, _ = await run_agent_turn(
-        prompt=summary_prompt,
-        user_id=user_id,
-        on_progress=on_progress,
-    )
-    
+
+    if source == "opencode":
+        from opencode_runner import run_opencode_turn
+        from ui_components import OPENCODE_MODELS
+
+        # Reliability chain: try the preferred/last-working OC model first,
+        # then the env default, then every known OC model — a single model's
+        # context limit or quota hiccup must not break /compact.
+        candidates: List[str] = []
+        for cand in [oc_model_arg or get_user_oc_model(user_id), OPENCODE_DEFAULT_MODEL] + [
+            m["id"] for m in OPENCODE_MODELS
+        ]:
+            if cand and cand not in candidates:
+                candidates.append(cand)
+
+        summary_reply = None
+        last_error = ""
+        for cand in candidates:
+            if on_progress:
+                await on_progress(f"🧠 正在從 本地 OpenCode 會話提煉記憶（模型: {cand}）...")
+            reply, _, _ = await run_opencode_turn(
+                prompt=summary_prompt,
+                user_id=user_id,
+                model=cand,
+                on_progress=on_progress,
+            )
+            if reply and not reply.startswith("❌"):
+                summary_reply = reply
+                break
+            last_error = reply or ""
+            logger.warning("compact summary failed with OC model %s: %s", cand, last_error[:200])
+        if not summary_reply:
+            summary_reply = last_error
+    else:
+        summary_reply, _, _ = await _run_agy_turn(
+            prompt=summary_prompt,
+            user_id=user_id,
+            on_progress=on_progress,
+        )
+
     if not summary_reply or summary_reply.startswith("❌"):
         return False, f"提煉對話記憶失敗：\n{summary_reply}", old_tokens, 0
-    
-    # 2. Reset conversation ID to open fresh session
+
+    # 2. Reset BOTH backends' sessions — all memory now migrates into the
+    # freshly seeded session on the current backend.
     reset_user_conversation(user_id)
-    
+    reset_user_oc_session(user_id)
+
     if on_progress:
         await on_progress("🔄 正在注入壓縮記憶至全新會話...")
-        
-    # 3. Seed new session with the compact summary
+
+    # 3. Seed new session on the CURRENT backend with the compact summary
     seed_prompt = (
         "【前續會話壓縮記憶注入】\n"
         "以下是上一會話壓縮後的項目狀態與決策摘要，請作為新會話的背景知識承接後續工作：\n\n"
         f"{summary_reply}\n\n"
         "請確認已載入該上下文，並簡短回覆「✅ 已成功載入前續記憶與項目狀態，請指示下一步工作。」"
     )
-    
+
     seed_reply, new_conv_id, new_turn_usage = await run_agent_turn(
         prompt=seed_prompt,
         user_id=user_id,
         on_progress=on_progress,
     )
-    
+
     new_session = user_session_usage.get(user_id, {})
     new_tokens = new_session.get("total_tokens", 0)
 
-    # Persist distilled project decision summary to local MEMORY.md
+    # The seeded session is now the single source of truth; drop the rolling
+    # transcript so no stale handoff context gets injected later.
+    clear_transcript(user_id)
+
+    # Persist the session summary to SESSIONS.md (short-term continuity aid,
+    # kept separate from curated long-term facts in MEMORY.md)
     try:
-        add_entry("memory", f"會話提煉決策摘要：\n{summary_reply[:1000]}")
+        add_session_summary(summary_reply)
     except Exception:
         pass
 

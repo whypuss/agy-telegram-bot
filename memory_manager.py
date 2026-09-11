@@ -65,6 +65,8 @@ def _get_file_path(target: str) -> Path:
     target_lower = target.lower().strip()
     if target_lower in ("user", "user.md", "preference", "pref"):
         return MEMORY_DIR / "USER.md"
+    if target_lower in ("sessions", "session", "sessions.md"):
+        return MEMORY_DIR / "SESSIONS.md"
     return MEMORY_DIR / "MEMORY.md"
 
 
@@ -108,8 +110,23 @@ def write_entries(target: str, entries: List[str]) -> bool:
             return False
 
 
-def add_entry(target: str, new_entry: str) -> Tuple[bool, str]:
-    """Add a new entry to the specified memory store."""
+def _entry_label(entry: str) -> str:
+    """Extract the 'label' prefix of an entry (text before the first colon)."""
+    parts = re.split(r"[：:]", entry, maxsplit=1)
+    if len(parts) == 2 and 2 <= len(parts[0].strip()) <= 30:
+        return parts[0].strip().lower()
+    return ""
+
+
+def add_entry(target: str, new_entry: str, source: str = "manual") -> Tuple[bool, str]:
+    """Add a new entry to the specified memory store.
+
+    Validation gate (candidate -> validate -> dedup -> merge):
+    - Threat scan and exact/containment dedup always apply.
+    - Label conflict (same label prefix, different value): automatic extractor
+      writes are SKIPPED (a model guess must never overwrite curated facts);
+      manual writes replace the stale entry (user authority wins).
+    """
     new_entry = new_entry.strip()
     if not new_entry:
         return False, "記憶內容不可為空。"
@@ -126,11 +143,45 @@ def add_entry(target: str, new_entry: str) -> Tuple[bool, str]:
         if len(new_entry) > 15 and new_entry.lower() in existing.lower():
             return True, "已存在包含該內容的記憶。"
 
+    # Label-conflict detection (e.g. same "服務端點紀錄" key, different IP/URL)
+    new_label = _entry_label(new_entry)
+    if new_label:
+        for idx, existing in enumerate(entries):
+            if _entry_label(existing) == new_label and existing.lower() != new_entry.lower():
+                if source == "auto":
+                    logger.warning(
+                        "Extractor conflict on label '%s': keeping existing entry, skipped auto-write of: %s",
+                        new_label, new_entry[:80],
+                    )
+                    return True, "與現有記憶衝突，已保留原記錄（自動寫入已跳過）。"
+                logger.info("Manual override on label '%s': replacing stale entry", new_label)
+                entries[idx] = new_entry
+                if write_entries(target, entries):
+                    return True, "✅ 已更新同標籤嘅舊記憶（以最新內容為準）。"
+                return False, "寫入本地記憶失敗。"
+
     entries.append(new_entry)
     if write_entries(target, entries):
         logger.info("Saved new memory to %s: %s", target, new_entry[:60])
         return True, "✅ 記憶已成功儲存至本機磁碟。"
     return False, "寫入本地記憶失敗。"
+
+
+def add_session_summary(summary: str) -> bool:
+    """Append a /compact session summary to SESSIONS.md (keeps last 5).
+
+    Session summaries are short-term continuity aids, kept separate from the
+    curated long-term facts in MEMORY.md.
+    """
+    import time as _time
+
+    summary = summary.strip()
+    if not summary:
+        return False
+    entries = read_entries("sessions")
+    entries.append(f"[{_time.strftime('%Y-%m-%d %H:%M')}] {summary[:3000]}")
+    entries = entries[-5:]
+    return write_entries("sessions", entries)
 
 
 def remove_entry(target: str, pattern: str) -> Tuple[bool, str]:
@@ -177,8 +228,9 @@ def build_memory_context() -> str:
     """
     user_entries = read_entries("user")
     memory_entries = read_entries("memory")
+    session_entries = read_entries("sessions")
 
-    if not user_entries and not memory_entries:
+    if not user_entries and not memory_entries and not session_entries:
         return ""
 
     blocks = [
@@ -196,6 +248,11 @@ def build_memory_context() -> str:
         blocks.append("### 🧠 System & Environment Facts (MEMORY.md):")
         for e in memory_entries:
             blocks.append(f"• {e}")
+        blocks.append("")
+
+    if session_entries:
+        blocks.append("### 📂 Previous Session Summary (SESSIONS.md):")
+        blocks.append(session_entries[-1])
         blocks.append("")
 
     blocks.append("</memory-context>\n")
@@ -238,7 +295,7 @@ def monitor_and_extract(user_prompt: str, agent_response: str) -> None:
             extracted = re.sub(r'^(記住|請記住|以後都|記一下|remember\s+to|remember)\s*[,:：，]?\s*', '', extracted, flags=re.IGNORECASE)
             if len(extracted) >= 4:
                 logger.info("Continual Listener: detected user preference -> saving to USER.md")
-                add_entry("user", extracted[:300])
+                add_entry("user", extracted[:300], source="auto")
                 break
 
     # 2. Execution Output Fact Detection (Server, Deployments, Credentials)
@@ -247,4 +304,4 @@ def monitor_and_extract(user_prompt: str, agent_response: str) -> None:
         deploy_matches = re.findall(r'(?:端點|服務|部署|上線|port|網址|URL|API|伺服器)[：:\s]+(https?://[^\s`"\'\)]+|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]+)', agent_response, re.IGNORECASE)
         for dep in deploy_matches[:2]:
             snippet = f"服務端點紀錄：{dep.strip()}"
-            add_entry("memory", snippet)
+            add_entry("memory", snippet, source="auto")

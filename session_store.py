@@ -141,6 +141,12 @@ def set_user_model(user_id: int, model_name: str) -> None:
     switch models due to quota exhaustion.
     """
     user_models[user_id] = model_name
+    # Remember OpenCode picks as the user's preferred OC model, so internal
+    # turns on the OC backend (e.g. cross-backend /compact summarization)
+    # reuse the last working OC model instead of the env default.
+    from config import is_opencode_model
+    if is_opencode_model(model_name):
+        user_oc_models[user_id] = model_name
     save_state()
 
 
