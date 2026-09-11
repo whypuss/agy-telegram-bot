@@ -38,7 +38,9 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
 - **Dual-Store Architecture**: Compatible with Hermes Agent, managing `USER.md` (communication habits, preferences, rules) and `MEMORY.md` (server IPs, credentials, ports, architectural decisions) delimited by `§`.
 - **Crash-Resilient State Persistence**: Active session IDs, model selections, and token counters are atomically persisted to disk. Reboots or network drops will **never wipe conversation context**.
 - **Continual Listening & Runtime Extractor**: Actively listens to Telegram chats and monitors execution outcomes to extract and store durable facts and guidelines.
-- **Frozen Snapshot Pattern**: Inject memories at session start without disturbing LLM prefix caching, conserving tokens while preserving recall.
+- **Frozen Snapshot Pattern**: Inject memories (USER.md + MEMORY.md + latest SESSIONS.md summary) at session start without disturbing LLM prefix caching, conserving tokens while preserving recall.
+- **Write Validation Gate (v1.1)**: Every entry carries `[date · auto|manual]` metadata; bidirectional containment dedup (an entry fully covered by a newer one is updated in place); on label conflicts, automatic extractor writes are skipped (model guesses never overwrite curated facts) while manual `/memory add` wins as user authority.
+- **Rotating Multi-Generation Backups**: 5 rotating `.bak` generations (`.bak` → `.bak.4`) are taken right before every write for instant rollback; when the 30KB cap is exceeded, eviction is value-based (auto before manual, older before newer) instead of blindly dropping the oldest.
 
 ### 6. 🌐 Network Resilience & Proxy Support
 - Supports HTTP, HTTPS, and SOCKS5 proxies (`PROXY_URL`).

@@ -14,8 +14,10 @@ Features:
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -25,8 +27,53 @@ logger = logging.getLogger("agy-tg-bot.memory")
 
 ENTRY_DELIMITER = "\n§\n"
 MAX_MEMORY_CHARS = 30000  # Bound memory to prevent prompt bloat
+BACKUP_GENERATIONS = 5    # Rotating backups: .bak, .bak.1 ... .bak.4
+
+
+def _rotate_backups(file_path: Path) -> None:
+    """Rotate backup generations: .bak.3 -> .bak.4, ..., .bak -> .bak.1,
+    then copy the current file to .bak. Called right before a real write."""
+    if not file_path.exists():
+        return
+    oldest = file_path.with_name(f"{file_path.name}.bak.{BACKUP_GENERATIONS - 1}")
+    if oldest.exists():
+        oldest.unlink()
+    for i in range(BACKUP_GENERATIONS - 2, 0, -1):
+        src = file_path.with_name(f"{file_path.name}.bak.{i}")
+        if src.exists():
+            src.replace(file_path.with_name(f"{file_path.name}.bak.{i + 1}"))
+    first = file_path.with_name(file_path.name + ".bak")
+    if first.exists():
+        first.replace(file_path.with_name(f"{file_path.name}.bak.1"))
+    shutil.copy2(file_path, first)
 
 _mem_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Entry Metadata (v1.1): "[YYYY-MM-DD · auto|manual] content"
+# ---------------------------------------------------------------------------
+
+_META_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2})(?:\s+[0-9:]+)?\s*·\s*(auto|manual)\]\s*")
+
+
+def _parse_meta(entry: str) -> Tuple[str, str]:
+    """Return (date, source) of an entry; legacy entries count as oldest manual."""
+    m = _META_RE.match(entry)
+    if m:
+        return m.group(1), m.group(2)
+    return "0000-00-00", "manual"
+
+
+def _strip_meta(entry: str) -> str:
+    """Strip the metadata prefix for content comparisons."""
+    return _META_RE.sub("", entry, count=1)
+
+
+def _eviction_key(entry: str) -> Tuple[int, str]:
+    """Eviction priority: auto-sourced first, then oldest date first."""
+    date, source = _parse_meta(entry)
+    return (0 if source == "auto" else 1, date)
+
 
 # ---------------------------------------------------------------------------
 # Threat & Injection Protection (from Hermes Agent)
@@ -86,20 +133,32 @@ def read_entries(target: str) -> List[str]:
 
 
 def write_entries(target: str, entries: List[str]) -> bool:
-    """Write entries to a memory file atomically."""
+    """Write entries to a memory file atomically, with .bak rollback copy.
+
+    When the size cap is exceeded, eviction drops the least valuable entries
+    first (auto-sourced before manual, older before newer) instead of
+    blindly dropping the oldest.
+    """
     file_path = _get_file_path(target)
     cleaned = [e.strip() for e in entries if e.strip()]
     content = ENTRY_DELIMITER.join(cleaned) + ("\n" if cleaned else "")
 
     if len(content) > MAX_MEMORY_CHARS:
-        logger.warning("Memory file %s exceeds %d chars, truncating oldest entries", file_path, MAX_MEMORY_CHARS)
+        logger.warning("Memory file %s exceeds %d chars, evicting low-value entries", file_path, MAX_MEMORY_CHARS)
         while cleaned and len(ENTRY_DELIMITER.join(cleaned)) > MAX_MEMORY_CHARS:
-            cleaned.pop(0)
+            victim_idx = min(range(len(cleaned)), key=lambda i: _eviction_key(cleaned[i]))
+            logger.info("Evicted memory entry: %s", cleaned[victim_idx][:60])
+            cleaned.pop(victim_idx)
         content = ENTRY_DELIMITER.join(cleaned) + ("\n" if cleaned else "")
 
     with _mem_lock:
         try:
             MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+            # Rotating rollback copies: only taken right before a real write
+            try:
+                _rotate_backups(file_path)
+            except Exception as backup_err:
+                logger.warning("Failed to rotate backups for %s: %s", file_path, backup_err)
             fd, tmp_path = tempfile.mkstemp(dir=str(MEMORY_DIR), prefix=f".{file_path.name}_", suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -119,10 +178,12 @@ def _entry_label(entry: str) -> str:
 
 
 def add_entry(target: str, new_entry: str, source: str = "manual") -> Tuple[bool, str]:
-    """Add a new entry to the specified memory store.
+    """Add a new entry to the specified memory store (v1.1).
 
-    Validation gate (candidate -> validate -> dedup -> merge):
-    - Threat scan and exact/containment dedup always apply.
+    Pipeline: candidate -> threat scan -> dedup -> conflict/merge -> write.
+    - Every entry is stamped with `[YYYY-MM-DD · auto|manual]` metadata.
+    - new ⊂ old: skip (already covered by an existing entry).
+    - old ⊂ new: replace the old entry (new content is a superset update).
     - Label conflict (same label prefix, different value): automatic extractor
       writes are SKIPPED (a model guess must never overwrite curated facts);
       manual writes replace the stale entry (user authority wins).
@@ -135,19 +196,35 @@ def add_entry(target: str, new_entry: str, source: str = "manual") -> Tuple[bool
     if err:
         return False, err
 
+    dated = new_entry if _META_RE.match(new_entry) else f"[{time.strftime('%Y-%m-%d')} · {source}] {new_entry}"
+    new_core = _strip_meta(dated).lower()
+
     entries = read_entries(target)
-    # Deduplication check
+
+    # Dedup: exact match or new content already contained in an existing entry
     for existing in entries:
-        if new_entry.lower() == existing.lower():
+        ex_core = _strip_meta(existing).lower()
+        if new_core == ex_core:
             return True, "該記憶已存在，無需重複記錄。"
-        if len(new_entry) > 15 and new_entry.lower() in existing.lower():
+        if len(new_core) > 15 and new_core in ex_core:
             return True, "已存在包含該內容的記憶。"
 
+    # Reverse containment: an existing entry is fully covered by the new,
+    # more detailed one -> update it in place instead of appending a near-dupe
+    for idx, existing in enumerate(entries):
+        ex_core = _strip_meta(existing).lower()
+        if len(ex_core) > 15 and ex_core in new_core:
+            entries[idx] = dated
+            if write_entries(target, entries):
+                logger.info("Updated memory (superset) in %s: %s", target, new_core[:60])
+                return True, "✅ 已用更詳細嘅新內容更新舊記憶。"
+            return False, "寫入本地記憶失敗。"
+
     # Label-conflict detection (e.g. same "服務端點紀錄" key, different IP/URL)
-    new_label = _entry_label(new_entry)
+    new_label = _entry_label(new_core)
     if new_label:
         for idx, existing in enumerate(entries):
-            if _entry_label(existing) == new_label and existing.lower() != new_entry.lower():
+            if _entry_label(_strip_meta(existing)) == new_label and _strip_meta(existing).lower() != new_core:
                 if source == "auto":
                     logger.warning(
                         "Extractor conflict on label '%s': keeping existing entry, skipped auto-write of: %s",
@@ -155,12 +232,12 @@ def add_entry(target: str, new_entry: str, source: str = "manual") -> Tuple[bool
                     )
                     return True, "與現有記憶衝突，已保留原記錄（自動寫入已跳過）。"
                 logger.info("Manual override on label '%s': replacing stale entry", new_label)
-                entries[idx] = new_entry
+                entries[idx] = dated
                 if write_entries(target, entries):
                     return True, "✅ 已更新同標籤嘅舊記憶（以最新內容為準）。"
                 return False, "寫入本地記憶失敗。"
 
-    entries.append(new_entry)
+    entries.append(dated)
     if write_entries(target, entries):
         logger.info("Saved new memory to %s: %s", target, new_entry[:60])
         return True, "✅ 記憶已成功儲存至本機磁碟。"

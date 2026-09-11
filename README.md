@@ -38,7 +38,9 @@
 - **雙軌本地文字庫**：採用與 Hermes Agent 相容架構，本機維護 `USER.md`（個人風格、溝通習慣、指令原則）與 `MEMORY.md`（伺服器 IP、帳密、部署端點、避坑經驗），以 `§` 分段。
 - **斷線與崩潰防丟 (Crash-Resilient State)**：每次輪次執行時會話 ID、模型與 Token 統計均原子寫入磁碟，即使 Telegram 掉線或進程重啟，上下文 **100% 無縫承接不丟失**。
 - **持續監聽與運行內容檢測 (Continual Memory Extractor)**：自動監聽 Telegram 對話關鍵偏好與 Agent 執行產出的系統端點/配置，即時落盤沉澱。
-- **靜態快照注入 (Frozen Snapshot Pattern)**：對話啟動時自動注入記憶快照，不破壞 LLM Prefix Caching，節省 Token 並極速回應。
+- **靜態快照注入 (Frozen Snapshot Pattern)**：對話啟動時自動注入記憶快照（USER.md + MEMORY.md + 最近一次 SESSIONS.md 摘要），不破壞 LLM Prefix Caching，節省 Token 並極速回應。
+- **寫入驗證閘 (v1.1)**：所有條目帶 `[日期 · auto/manual]` 元數據；雙向包含去重（舊條目被新條目涵蓋時自動更新）；同標籤衝突時自動寫入一律跳過（模型猜測永不覆蓋人工策展事實），人手 `/memory add` 以用戶為準。
+- **多代輪轉備份**：每次寫入前自動輪轉保留 5 代 `.bak` 備份（`.bak` → `.bak.4`），誤寫可即時 rollback；30KB 上限爆滿時按價值驅逐（auto 先於 manual、舊先於新），唔再單純丟最舊。
 
 ### 6. 🌐 網路容錯與 Proxy 支援
 - 支援 HTTP / HTTPS / SOCKS5 代理。
