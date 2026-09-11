@@ -49,7 +49,19 @@
 - **陌生人自動攔截**：未授權使用者傳送訊息會立刻被安全攔截並提示其 Telegram ID，防止未授權使用與 API 額度消耗。
 - **動態綁定支援**：可透過 `agy-gateway bind <id>` 與 `agy-gateway unbind <id>` 即時管理授權名單。
 
-### 8. ⏱️ 1 分鐘守護與掉線自動恢復 (Watchdog & Auto-Reconnect)
+### 8. 💻 雙後端架構：Antigravity + 本地 OpenCode (`opencode_runner.py`)
+- **本地 OpenCode 模型接入**：透過 `opencode run --format json` 非互動模式執行本地模型，NDJSON 串流即時解析工具調用與 Token 用量，無需依賴全域 `opencode.json` 預設（避免指向失效代理）。
+- **會話無縫承接**：每個使用者嘅 OpenCode Session ID 獨立持久化（`opencode run -s <id>`），跨重啟對話上下文不丟失。
+- **自動備援 (Auto-Fallback)**：當 Antigravity 後端失敗時，自動切換本地 OpenCode 接續執行，狀態卡會標示實際服務後端（⚡ Antigravity / 💻 本地 OpenCode / 🔁 OpenCode 備援）。
+- **一鍵切換**：`/model` 選單內建 (OC) 本地模型分區，點擊即切換後端並自動開啟新會話。
+
+### 9. 📝 執行中即時修正整合 (Mid-Run Correction Steering)
+- **修正即時生效**：任務運行途中直接傳送文字訊息，Bot 會**立即中止目前執行**，並把「原始任務 + 所有修正」合併重新執行——唔使等第一次跑完。
+- **支援多則修正**：可連續傳送多則修正，全部按時間順序累積；最終只輸出**一個整合所有輸入嘅答案**，若修正與原始任務衝突以最新修正為準。
+- **靜默重跑**：人為中止（修正或 `/cancel`）觸發嘅 SIGTERM 退出會被正確識別為取消，唔會再誤顯示 `Exit Code: -15` 失敗訊息。
+- **指令級控制**：`/steer <內容>` 可清空已累積修正並以新指示重跑；`/cancel`、`/reset` 會一併清除修正狀態。
+
+### 10. ⏱️ 1 分鐘守護與掉線自動恢復 (Watchdog & Auto-Reconnect)
 - **全自動狀態探測**：每 60 秒透過 `watchdog.py` 檢查進程存活與 Telegram API 連通性。
 - **自動拉起與重連**：若發現網路重置或進程異常，守護程序會自動執行優雅重連與重啟，杜絕靜默斷線。
 - **專屬維運指令 `agy-gateway`**：整合 `status`、`start`、`stop`、`restart`、`check`、`logs`，並內建 macOS LaunchAgent 與 Linux Systemd 開機持久自啟服務模板。
@@ -66,6 +78,7 @@ tg-antigravity-bot/
 ├── session_store.py   # 會話與進程抗掉線持久化狀態儲存庫 (JSON 磁碟原子寫入)
 ├── formatter.py       # Telegram MarkdownV2 轉換、GFM 表格重構與代碼感知分段
 ├── agent_runner.py    # agy CLI 子進程管理、stderr 即時解析與任務中止機制
+├── opencode_runner.py # 本地 OpenCode 後端：NDJSON 串流、Session 持久化與備援執行
 ├── media_handler.py   # 照片、語音、檔案下載快取與本機生成媒體偵測
 ├── ui_components.py   # 模型切換 Inline Keyboard、狀態與說明卡片排版
 ├── requirements.txt   # Python 依賴清單
@@ -106,6 +119,12 @@ cp .env.example .env
 TELEGRAM_BOT_TOKEN=123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 ALLOWED_USER_IDS=                           # 先留空，步驟 4 取得
 PROXY_URL=                                  # 若在大陸地區可設定 http://127.0.0.1:7890
+
+# 本地 OpenCode 後端（可選，啟用本機模型與自動備援）
+ENABLE_OPENCODE_FALLBACK=true               # Antigravity 失敗時自動用本地 OpenCode 重試
+OPENCODE_PATH=                              # opencode 可執行檔路徑（留空自動尋找）
+OPENCODE_MODEL=sensenova/deepseek-v4-flash  # 本地預設／備援模型
+OPENCODE_TIMEOUT=600                        # 本地執行超時（秒）
 ```
 
 ### 4. 啟動並取得你的 User ID
@@ -133,6 +152,7 @@ python bot.py
 | `/reset` 或 `/new` | 重置當前對話記憶，開啟全新 Session |
 | `/status` | 查看目前 Agent 運作狀態、Token 用量、會話 ID、工作目錄與上線時間 |
 | `/cancel` 或 `/stop` | 中止目前正在執行的長時間任務 |
+| `/steer <內容>` | 中止目前任務，清空已累積修正並以新指示立即重跑 |
 | `/clear` | 清理本機快取的多模態暫存檔案 |
 | `/help` | 顯示完整功能說明卡片 |
 

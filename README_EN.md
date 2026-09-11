@@ -49,7 +49,19 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
 - **Unauthorized Interception**: Unregistered senders are immediately blocked from consuming LLM calls or executing commands, receiving an unauthorized alert showing their user ID.
 - **Dynamic Binding CLI**: Add or remove authorized Telegram IDs anytime via `agy-gateway bind <id>` and `agy-gateway unbind <id>`.
 
-### 8. ⏱️ 1-Minute Watchdog & Auto-Reconnect Recovery
+### 8. 💻 Dual-Backend Architecture: Antigravity + Local OpenCode (`opencode_runner.py`)
+- **Local OpenCode Models**: Runs local models via `opencode run --format json` in non-interactive mode, streaming NDJSON events for real-time tool-call progress and token accounting — never relying on the global `opencode.json` default (which may point at a dead proxy).
+- **Seamless Session Continuity**: Per-user OpenCode session IDs are persisted (`opencode run -s <id>`), so conversation context survives restarts.
+- **Auto-Fallback**: When the Antigravity backend fails, execution automatically falls back to local OpenCode; the status card labels the actual serving backend (⚡ Antigravity / 💻 Local OpenCode / 🔁 OpenCode Fallback).
+- **One-Click Switching**: The `/model` picker includes a dedicated (OC) local-model section — tap to switch backends and start a fresh session instantly.
+
+### 9. 📝 Mid-Run Correction Steering
+- **Instant Corrections**: Send a text message while a task is running and the bot **immediately cancels the current execution**, then re-runs with the original task plus all corrections merged — no waiting for the first run to finish.
+- **Multiple Corrections**: Corrections accumulate in chronological order; the final output is **a single answer integrating every input**, with newer corrections taking precedence on conflicts.
+- **Silent Re-runs**: Deliberate terminations (correction steering or `/cancel`) are recognized as cancellations instead of surfacing a spurious `Exit Code: -15` failure message.
+- **Command-Level Control**: `/steer <text>` discards accumulated corrections and restarts with a fresh instruction; `/cancel` and `/reset` also clear correction state.
+
+### 10. ⏱️ 1-Minute Watchdog & Auto-Reconnect Recovery
 - **Continuous Health Probing**: Periodically checks process liveness and tests Telegram API connectivity every 60 seconds (`watchdog.py`).
 - **Automatic Reconnection**: Automatically detects broken connections, hung loops, or DNS/network transitions, triggering a graceful service restart to restore communication.
 - **Unified Management CLI `agy-gateway`**: Complete operational command suite (`status`, `start`, `stop`, `restart`, `check`, `logs`), packaged with ready-to-use macOS LaunchAgent and Linux Systemd templates for persistent 24/7 background operation.
@@ -66,6 +78,7 @@ tg-antigravity-bot/
 ├── session_store.py   # Crash-resilient state persistence engine (atomic JSON serialization)
 ├── formatter.py       # MarkdownV2 converter, GFM table wrapper & code-aware chunking
 ├── agent_runner.py    # agy CLI subprocess management, stderr streaming & task cancellation
+├── opencode_runner.py # Local OpenCode backend: NDJSON streaming, session persistence & fallback
 ├── media_handler.py   # Inbound media download cache & outbound media detection
 ├── ui_components.py   # Model selector inline keyboards, status & help formatters
 ├── requirements.txt   # Python package dependencies
@@ -109,6 +122,12 @@ Edit `.env`:
 TELEGRAM_BOT_TOKEN=123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 ALLOWED_USER_IDS=                           # Leave blank initially, get in Step 4
 PROXY_URL=                                  # Optional: http://127.0.0.1:7890 or socks5://127.0.0.1:1080
+
+# Local OpenCode backend (optional: enables local models & auto-fallback)
+ENABLE_OPENCODE_FALLBACK=true               # Auto-retry with local OpenCode when Antigravity fails
+OPENCODE_PATH=                              # Path to opencode executable (auto-detect if blank)
+OPENCODE_MODEL=sensenova/deepseek-v4-flash  # Local default / fallback model
+OPENCODE_TIMEOUT=600                        # Local execution timeout (seconds)
 ```
 
 ### 4. Start & Authorize Your User ID
@@ -136,6 +155,7 @@ python bot.py
 | `/reset` or `/new` | Reset conversation memory and start a fresh session |
 | `/status` | View agent health, token usage, active model, session ID, workspace, and uptime |
 | `/cancel` or `/stop` | Abort a long-running agent turn immediately |
+| `/steer <text>` | Abort the current task, discard accumulated corrections, and restart with a new instruction |
 | `/clear` | Purge local temporary media cache files |
 | `/help` | Display comprehensive command and feature guide |
 
