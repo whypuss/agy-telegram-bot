@@ -18,6 +18,10 @@ venv.bak/
 bot_stdout.log
 bot_stderr.log
 
+# Runtime state (local only, never commit)
+.bot.pid
+.env.bak.*
+
 # Caches & temporary files
 .cache/
 tg_media_cache/

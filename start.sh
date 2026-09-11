@@ -8,5 +8,6 @@ if [ -f "$PLIST" ]; then
 else
     echo "Starting via nohup in background..."
     nohup ./venv/bin/python3 bot.py > bot.log 2>&1 &
-    echo "Started PID: $!"
+    echo "$!" > .bot.pid
+    echo "Started PID: $! (saved to .bot.pid)"
 fi
