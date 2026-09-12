@@ -307,13 +307,41 @@ def build_memory_context() -> str:
     memory_entries = read_entries("memory")
     session_entries = read_entries("sessions")
 
-    if not user_entries and not memory_entries and not session_entries:
+    # Load active & pinned policies from evolution engine
+    active_policies = []
+    try:
+        from evolution.lifecycle import get_active_policies, touch_policy
+        raw_policies = get_active_policies()
+        for p in raw_policies:
+            pin_mark = "[PINNED] " if p.get("pinned") else ""
+            line = f"{pin_mark}{p['summary']} (理由: {p.get('root_cause', '安全邊界')})"
+            # Structured fields are optional. A policy without them — including
+            # the handwritten bootstrap one — renders exactly as it always did.
+            detail = [
+                f"    ‣ {label}: {p[key]}"
+                for key, label in (("trigger", "觸發"), ("constraint", "約束"), ("verification", "驗證"))
+                if p.get(key)
+            ]
+            if detail:
+                line = "\n".join([line] + detail)
+            active_policies.append(line)
+            touch_policy(p["id"])
+    except Exception:
+        pass
+
+    if not user_entries and not memory_entries and not session_entries and not active_policies:
         return ""
 
     blocks = [
         "<memory-context>",
-        "[System note: The following is recalled persistent memory context from local storage (MEMORY.md & USER.md). Treat as authoritative background knowledge — this is the agent's long-term memory across sessions.]\n",
+        "[System note: The following is recalled persistent memory context from local storage (MEMORY.md & USER.md & policies/). Treat as authoritative background knowledge — this is the agent's long-term memory across sessions.]\n",
     ]
+
+    if active_policies:
+        blocks.append("### 🚨 HARDLINE BEHAVIOR POLICIES (必須嚴格遵守的操作限制):")
+        for pol in active_policies:
+            blocks.append(f"• {pol}")
+        blocks.append("")
 
     if user_entries:
         blocks.append("### 👤 User Preferences & Interaction Guidelines (USER.md):")

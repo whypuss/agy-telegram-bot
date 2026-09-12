@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 from telegram import (
     Update,
     InlineKeyboardMarkup,
+    InlineKeyboardButton,
     LinkPreviewOptions,
     BotCommand,
 )
@@ -46,6 +47,9 @@ from config import (
     CACHE_DIR,
     is_opencode_model,
     is_authorized,
+    is_policy_admin,
+    POLICY_ADMIN_IDS,
+    POLICY_ADMIN_CONFIG_ERROR,
 )
 from formatter import (
     format_markdown_v2,
@@ -87,6 +91,15 @@ from ui_components import (
     format_usage_card,
     format_help_card,
     resolve_model_alias,
+)
+from evolution import (
+    start_evolution_worker,
+    set_bot_instance,
+    approve_proposal,
+    reject_proposal,
+    list_pending_proposals,
+    get_proposal,
+    set_policy_pinned,
 )
 
 # ---------------------------------------------------------------------------
@@ -237,6 +250,16 @@ async def send_detected_media(
                         parse_mode=ParseMode.MARKDOWN_V2,
                         message_thread_id=thread_id,
                     )
+            elif media_type == "video":
+                with open(file_path, "rb") as video_file:
+                    await context.bot.send_video(
+                        chat_id=chat_id,
+                        video=video_file,
+                        caption=f"🎬 `{Path(file_path).name}`",
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        message_thread_id=thread_id,
+                        supports_streaming=True,
+                    )
             elif media_type == "document":
                 with open(file_path, "rb") as doc_file:
                     await context.bot.send_document(
@@ -282,6 +305,7 @@ async def process_agent_turn(
     start_time = time.time()
     progress_items: List[str] = []
     last_status_update = [start_time]
+    last_progress_block = [""]
 
     # Continuous typing heartbeat
     typing_active = True
@@ -314,11 +338,16 @@ async def process_agent_turn(
             progress_items.pop(0)
 
         now = time.time()
-        # Rate limit status edits to once every 1.5 seconds
-        if now - last_status_update[0] >= 1.5:
+        progress_block = "\n".join(progress_items)
+        content_changed = (progress_block != last_progress_block[0])
+        time_elapsed = (now - last_status_update[0] >= 1.5)
+        heartbeat_elapsed = (now - last_status_update[0] >= 5.0)
+
+        # Rate limit status edits: only edit when content changes (min 1.5s) or periodic 5s heartbeat
+        if (content_changed and time_elapsed) or heartbeat_elapsed:
             last_status_update[0] = now
+            last_progress_block[0] = progress_block
             elapsed = format_elapsed(int(now - start_time))
-            progress_block = "\n".join(progress_items)
             msg_text = (
                 f"⏳ *Agent 處理中\\.\\.\\.* \\({elapsed}\\)\n"
                 f"🔌 後端: {format_markdown_v2(backend_label)}\n"
@@ -1206,6 +1235,160 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def cmd_proposals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /proposals to list pending self-evolution proposals awaiting human approval."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    proposals = list_pending_proposals()
+    if not proposals:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="✨ 目前沒有待審批的自我進化提案 (Pending Proposals 為空)。",
+            reply_to_message_id=update.message.message_id if update.message else None,
+        )
+        return
+
+    lines = [f"📜 **待審批的自我進化提案 (共 {len(proposals)} 項)**\n"]
+    buttons = []
+
+    for p in proposals:
+        pid = p["id"]
+        ptype = p.get("proposal_type") or p.get("type", "policy")
+        summary = p.get("summary") or p.get("title", pid)
+        root_cause = p.get("root_cause") or p.get("reason", "無")
+        pinned = p.get("pinned", False)
+        pin_badge = " 📌 [Pinned]" if pinned else ""
+        conf = p.get("confidence", 0.0)
+
+        icon = "🚨 Policy" if "policy" in ptype else "🛠️ Skill"
+        lines.append(
+            f"• **[{icon}] {summary}**{pin_badge}\n"
+            f"  ID: `{pid}` | 置信度: `{conf:.2f}`\n"
+            f"  理由: {root_cause}\n"
+        )
+        buttons.append([
+            InlineKeyboardButton(f"✅ 批准 {pid}", callback_data=f"evo:app:{pid}"),
+            InlineKeyboardButton(f"❌ 駁回 {pid}", callback_data=f"evo:rej:{pid}"),
+        ])
+
+    lines.append("💡 點擊下方按鈕或使用 `/approve <id>` / `/reject <id>` 進行審核。")
+    kb = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(
+        text="\n".join(lines),
+        reply_markup=kb,
+        reply_to_message_id=update.message.message_id if update.message else None,
+    )
+
+
+async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /approve <id> to approve a pending proposal."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    args = context.args or []
+    if not args:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="⚠️ 請指定欲批准的 Proposal ID，例如：`/approve pol_12345678`\n使用 `/proposals` 查看列表。",
+            reply_to_message_id=update.message.message_id if update.message else None,
+        )
+        return
+
+    pid = args[0].strip()
+    success, msg = approve_proposal(pid)
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=msg,
+        reply_to_message_id=update.message.message_id if update.message else None,
+    )
+
+
+async def _cmd_set_pinned(update: Update, context: ContextTypes.DEFAULT_TYPE, pinned: bool) -> None:
+    """Shared body for /pin and /unpin.
+
+    Deliberately thin: it verifies who is asking, extracts one exact rule id, and
+    hands those plus the target boolean to set_policy_pinned(). No policy content
+    from Telegram is read, parsed or written here.
+    """
+    uid = update.effective_user.id
+    verb = "pin" if pinned else "unpin"
+
+    if not is_authorized(uid):
+        return
+    if not is_policy_admin(uid):
+        logger.warning("⛔ [%s] denied for non-admin uid=%s", verb, uid)
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text=f"⛔ `/{verb}` 只限 policy admin。\n你的 User ID: `{uid}`",
+            reply_to_message_id=update.message.message_id if update.message else None,
+        )
+        return
+
+    args = context.args or []
+    if len(args) != 1:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text=(f"⚠️ 用法：`/{verb} <rule_id>`\n"
+                  f"例如：`/{verb} rule_evidence-discipline`\n"
+                  f"只接受精確 rule ID，唔支援模糊搜尋或 summary。"),
+            reply_to_message_id=update.message.message_id if update.message else None,
+        )
+        return
+
+    success, msg = set_policy_pinned(args[0].strip(), pinned, actor=uid)
+    logger.info("📌 [%s] uid=%s rule=%s -> %s", verb, uid, args[0].strip()[:64], success)
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=msg,
+        reply_to_message_id=update.message.message_id if update.message else None,
+    )
+
+
+async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /pin <rule_id> — grant a policy permanent staleness exemption."""
+    await _cmd_set_pinned(update, context, pinned=True)
+
+
+async def cmd_unpin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /unpin <rule_id> — revoke it and restore normal lifecycle."""
+    await _cmd_set_pinned(update, context, pinned=False)
+
+
+async def cmd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /reject <id> to reject a pending proposal."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    args = context.args or []
+    if not args:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="⚠️ 請指定欲駁回的 Proposal ID，例如：`/reject pol_12345678`\n使用 `/proposals` 查看列表。",
+            reply_to_message_id=update.message.message_id if update.message else None,
+        )
+        return
+
+    pid = args[0].strip()
+    success, msg = reject_proposal(pid)
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=msg,
+        reply_to_message_id=update.message.message_id if update.message else None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Callback Query Handler (Interactive Buttons)
 # ---------------------------------------------------------------------------
@@ -1302,6 +1485,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         ])
         await query.edit_message_text(text=overview, reply_markup=kb)
 
+    elif data.startswith("evo:app:"):
+        pid = data.split(":", 2)[2]
+        success, msg = approve_proposal(pid)
+        await query.edit_message_text(f"📝 **自我進化審批結果**\n\n{msg}")
+
+    elif data.startswith("evo:rej:"):
+        pid = data.split(":", 2)[2]
+        success, msg = reject_proposal(pid)
+        await query.edit_message_text(f"📝 **自我進化審批結果**\n\n{msg}")
+
     elif data == "noop":
         pass
 
@@ -1330,22 +1523,37 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def post_init(app: Application) -> None:
     """Register slash commands with Telegram to enable auto-completion."""
-    commands = [
-        BotCommand("usage", "📊 查看 Token 用量與資源消耗統計"),
-        BotCommand("model", "🧠 切換 AI 模型"),
-        BotCommand("memory", "🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)"),
-        BotCommand("compact", "📦 壓縮當前會話上下文（瘦身並保留關鍵記憶）"),
-        BotCommand("status", "📈 查看系統狀態與當前會話"),
-        BotCommand("reset", "🔄 重置會話記憶（開啟新對話）"),
-        BotCommand("cancel", "🛑 中止正在運行的任務"),
-        BotCommand("clear", "🧹 清理暫存多模態檔案"),
-        BotCommand("help", "📖 顯示說明手冊"),
-    ]
+    # Public list first, then a per-admin chat scope that adds /pin and /unpin.
+    # Chat scope outranks default, so admins see everything and nobody else sees
+    # commands they cannot run.
+    public = build_command_menu(include_admin=False)
     try:
-        await app.bot.set_my_commands(commands)
-        logger.info("Telegram bot commands registered successfully")
+        await app.bot.set_my_commands(public)
+        logger.info("Telegram bot commands registered: %d public", len(public))
     except Exception as e:
         logger.warning("Failed to register bot commands: %s", e)
+
+    admin_menu = build_command_menu(include_admin=True)
+    for admin_id in POLICY_ADMIN_IDS:
+        try:
+            from telegram import BotCommandScopeChat
+            await app.bot.set_my_commands(admin_menu, scope=BotCommandScopeChat(chat_id=admin_id))
+            logger.info("📌 Admin command scope set for %s: %d commands", admin_id, len(admin_menu))
+        except Exception as e:
+            logger.warning("Failed to set admin command scope for %s: %s", admin_id, e)
+
+    # Initialize Evolution Worker background daemon
+    try:
+        set_bot_instance(app.bot)
+        asyncio.create_task(start_evolution_worker())
+        # create_task only means "scheduled". The worker declines to run without
+        # an auxiliary API key, so announcing success here would contradict the
+        # warning it logs a moment later.
+        from evolution.worker import evaluator_available
+        if evaluator_available():
+            logger.info("🚀 Hermes-inspired Evolution Worker background loop scheduled")
+    except Exception as e:
+        logger.error("Failed to start Evolution Worker: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1361,7 +1569,26 @@ def main() -> None:
     if not ALLOWED_USER_IDS:
         logger.warning("⚠️ ALLOWED_USER_IDS 未設定 — 所有人皆能使用此 Bot！")
 
-    builder = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init)
+    if not POLICY_ADMIN_IDS:
+        logger.warning(
+            "⚠️ %s — /pin 同 /unpin 會對所有人拒絕（fail closed）。"
+            "要啟用請喺 .env 設定 POLICY_ADMIN_IDS=<telegram_user_id>。"
+            "Bot 其餘功能不受影響。",
+            POLICY_ADMIN_CONFIG_ERROR or "POLICY_ADMIN_IDS 為空",
+        )
+    else:
+        logger.info("📌 Policy admin: %s", POLICY_ADMIN_IDS)
+
+    builder = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .connect_timeout(15.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(15.0)
+        .get_updates_read_timeout(35.0)
+    )
 
     # Proxy Support
     if PROXY_URL:
@@ -1373,18 +1600,70 @@ def main() -> None:
     # Global error handler
     app.add_error_handler(error_handler)
 
+    register_handlers(app)
+
+    logger.info("🚀 Antigravity Telegram Bot 正在啟動...")
+    logger.info("📂 工作目錄: %s", WORKSPACE_DIR)
+    logger.info("🧠 預設模型: %s", DEFAULT_MODEL)
+    logger.info("👥 授權使用者: %s", ALLOWED_USER_IDS or "(所有人)")
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+    )
+
+
+# Single source of truth for commands: (aliases, handler, menu description).
+# Handler registration and the Telegram menu are both generated from this, so a
+# command cannot appear in the UI without a handler behind it, or vice versa.
+# A None description means the command works but stays out of the menu.
+COMMAND_SPEC = [
+    (["start"],                cmd_start,     None),
+    (["usage"],                cmd_usage,     "📊 查看 Token 用量與資源消耗統計"),
+    (["model", "models"],      cmd_model,     "🧠 切換 AI 模型"),
+    (["memory", "mem"],        cmd_memory,    "🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)"),
+    (["proposals"],            cmd_proposals, "📜 查看待審批的自我進化提案 (Policies / Skills)"),
+    (["approve"],              cmd_approve,   None),
+    (["reject"],               cmd_reject,    None),
+    (["pin"],                  cmd_pin,       "📌 [管理員限定] 釘住 policy,免疫 staleness 清理"),
+    (["unpin"],                cmd_unpin,     "📍 [管理員限定] 解除釘住,恢復正常 lifecycle"),
+    (["compact", "summarize"], cmd_compact,   "📦 壓縮當前會話上下文（瘦身並保留關鍵記憶）"),
+    (["status"],               cmd_status,    "📈 查看系統狀態與當前會話"),
+    (["reset", "new"],         cmd_reset,     "🔄 重置會話記憶（開啟新對話）"),
+    (["cancel", "stop"],       cmd_cancel,    "🛑 中止正在運行的任務"),
+    (["steer"],                cmd_steer,     None),
+    (["clear"],                cmd_clear,     "🧹 清理暫存多模態檔案"),
+    (["help"],                 cmd_help,      "📖 顯示說明手冊"),
+]
+
+
+ADMIN_ONLY_COMMANDS = {"pin", "unpin"}
+
+
+def build_command_menu(include_admin: bool = True) -> list:
+    """Build the Telegram menu from COMMAND_SPEC.
+
+    Always uses the first alias, which is the same string register_handlers()
+    binds — the menu can never advertise a command that is not handled.
+    With include_admin=False the admin-only entries are omitted, which is what
+    the default scope gets: Telegram menus have no per-user filtering, so the
+    only way to keep /pin out of a non-admin's list is to not send it to them.
+    """
+    return [
+        BotCommand(aliases[0], desc)
+        for aliases, _, desc in COMMAND_SPEC
+        if desc and (include_admin or aliases[0] not in ADMIN_ONLY_COMMANDS)
+    ]
+
+
+def register_handlers(app) -> None:
+    """Attach every command, callback and media handler.
+
+    Split out of main() so the handler set can be asserted in tests against the
+    same code path the bot actually runs, rather than a copy that can drift.
+    """
     # Commands
-    app.add_handler(CommandHandler(["start"], cmd_start))
-    app.add_handler(CommandHandler(["usage"], cmd_usage))
-    app.add_handler(CommandHandler(["model", "models"], cmd_model))
-    app.add_handler(CommandHandler(["memory", "mem"], cmd_memory))
-    app.add_handler(CommandHandler(["compact", "summarize"], cmd_compact))
-    app.add_handler(CommandHandler(["reset", "new"], cmd_reset))
-    app.add_handler(CommandHandler(["status"], cmd_status))
-    app.add_handler(CommandHandler(["cancel", "stop"], cmd_cancel))
-    app.add_handler(CommandHandler(["steer"], cmd_steer))
-    app.add_handler(CommandHandler(["clear"], cmd_clear))
-    app.add_handler(CommandHandler(["help"], cmd_help))
+    for aliases, handler, _ in COMMAND_SPEC:
+        app.add_handler(CommandHandler(aliases, handler))
 
     # Inline Keyboard Callbacks
     app.add_handler(CallbackQueryHandler(handle_callback_query))
@@ -1396,15 +1675,6 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    logger.info("🚀 Antigravity Telegram Bot 正在啟動...")
-    logger.info("📂 工作目錄: %s", WORKSPACE_DIR)
-    logger.info("🧠 預設模型: %s", DEFAULT_MODEL)
-    logger.info("👥 授權使用者: %s", ALLOWED_USER_IDS or "(所有人)")
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=False,
-    )
 
 
 if __name__ == "__main__":

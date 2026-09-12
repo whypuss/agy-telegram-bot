@@ -20,6 +20,7 @@ from typing import Callable, Coroutine, Dict, List, Optional, Tuple
 from config import (
     AGY_PATH,
     AGY_TIMEOUT,
+    AGY_ADD_WORKSPACE_DIR,
     DEFAULT_MODEL,
     WORKSPACE_DIR,
     AGENT_SYSTEM_PROMPT,
@@ -259,6 +260,13 @@ async def _run_agy_turn(
         if mem_ctx:
             effective_prompt = f"{mem_ctx}\n{prompt}"
 
+        # agy only reads AGENTS.md when --add-dir is passed, and that flag also
+        # drags in every skill description (+4,808 tokens). Carry standing
+        # instructions here instead — first turn only, so the cached prefix
+        # stays byte-identical across the rest of the conversation.
+        if AGENT_SYSTEM_PROMPT:
+            effective_prompt = f"[系統指示: {AGENT_SYSTEM_PROMPT}]\n{effective_prompt}"
+
     # Cross-backend handoff: if the user recently chatted on the other backend
     # (e.g. switched model after quota exhaustion), inject those missed turns
     # so this backend continues seamlessly instead of losing memory.
@@ -277,7 +285,7 @@ async def _run_agy_turn(
     if conv_id:
         cmd.extend(["--conversation", conv_id])
 
-    if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
+    if AGY_ADD_WORKSPACE_DIR and WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
         cmd.extend(["--add-dir", WORKSPACE_DIR])
 
     # Append prompt to --print
@@ -294,7 +302,7 @@ async def _run_agy_turn(
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        stdin=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=WORKSPACE_DIR if os.path.isdir(WORKSPACE_DIR) else None,
@@ -306,10 +314,14 @@ async def _run_agy_turn(
     stderr_lines: list[str] = []
     stdout_raw_lines: list[str] = []
     result_data: dict = {}
+    result_event = asyncio.Event()
 
     async def _stream_stdout():
         while True:
-            line_bytes = await proc.stdout.readline()
+            try:
+                line_bytes = await proc.stdout.readline()
+            except Exception:
+                break
             if not line_bytes:
                 break
             line_str = line_bytes.decode("utf-8", errors="replace").strip()
@@ -335,10 +347,14 @@ async def _run_agy_turn(
                     res = event_obj.get("result", {})
                     if isinstance(res, dict):
                         result_data.update(res)
+                    result_event.set()
 
     async def _stream_stderr():
         while True:
-            line_bytes = await proc.stderr.readline()
+            try:
+                line_bytes = await proc.stderr.readline()
+            except Exception:
+                break
             if not line_bytes:
                 break
             decoded = line_bytes.decode("utf-8", errors="replace").rstrip()
@@ -355,9 +371,39 @@ async def _run_agy_turn(
     stderr_task = asyncio.create_task(_stream_stderr())
     stdout_task = asyncio.create_task(_stream_stdout())
 
+    async def _wait_process_completion():
+        proc_wait_task = asyncio.create_task(proc.wait())
+        result_wait_task = asyncio.create_task(result_event.wait())
+        done, pending = await asyncio.wait(
+            [proc_wait_task, result_wait_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+
+        # If result was already received, give process 2s to cleanly exit
+        if proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=1.5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+        # Give streams up to 1.5s to flush remaining buffers
+        try:
+            await asyncio.wait_for(asyncio.gather(stderr_task, stdout_task), timeout=1.5)
+        except asyncio.TimeoutError:
+            pass
+
     try:
         await asyncio.wait_for(
-            asyncio.gather(stderr_task, stdout_task, proc.wait()),
+            _wait_process_completion(),
             timeout=AGY_TIMEOUT + 15,
         )
     except asyncio.CancelledError:
@@ -369,6 +415,11 @@ async def _run_agy_turn(
             stderr_task.cancel()
         if not stdout_task.done():
             stdout_task.cancel()
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         _active_processes.pop(user_id, None)
 
     # Process was deliberately terminated (user cancel / correction steer):
@@ -537,10 +588,21 @@ async def _run_agy_turn(
         else:
             response_text = "（Agent 回覆為空）"
 
-    # Continual Listening & Runtime Memory Extractor in background
+    # Continual Listening & Runtime Evolution Reviewer in background
     if response_text and not response_text.startswith("❌"):
         try:
+            # 1. Legacy fast memory extractor
             asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
+            # 2. Hermes-style durable Evolution Queue (durable trajectory analysis)
+            from evolution.queue import enqueue_turn
+            traj = {
+                "user_prompt": prompt,
+                "agent_response": response_text,
+                "backend": "agy",
+                "timestamp": int(time.time()),
+                "user_id": user_id
+            }
+            enqueue_turn(user_id, traj)
         except Exception:
             pass
         # Record into the rolling cross-backend transcript for handoff
