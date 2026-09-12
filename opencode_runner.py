@@ -29,6 +29,8 @@ from config import (
 
 logger = logging.getLogger("agy-tg-bot.opencode")
 
+from agent_runner import STREAM_LINE_LIMIT
+
 from session_store import (
     user_session_usage,
     user_last_turn_usage,
@@ -179,6 +181,9 @@ async def run_opencode_turn(
             stderr=asyncio.subprocess.PIPE,
             cwd=WORKSPACE_DIR if os.path.isdir(WORKSPACE_DIR) else None,
             env=env,
+            # See agent_runner.STREAM_LINE_LIMIT — asyncio's 64 KiB default
+            # truncates NDJSON streams mid-turn.
+            limit=STREAM_LINE_LIMIT,
         )
     except FileNotFoundError:
         return (
@@ -203,7 +208,11 @@ async def run_opencode_turn(
     async def _stream_stdout():
         nonlocal in_tokens, out_tokens, reasoning_tokens, cache_read, new_session_id
         while True:
-            line_bytes = await proc.stdout.readline()
+            try:
+                line_bytes = await proc.stdout.readline()
+            except Exception as e:
+                logger.error("opencode stdout stream aborted: %s: %s", type(e).__name__, e)
+                break
             if not line_bytes:
                 break
             line_str = line_bytes.decode("utf-8", errors="replace").strip()
@@ -279,7 +288,11 @@ async def run_opencode_turn(
 
     async def _stream_stderr():
         while True:
-            line_bytes = await proc.stderr.readline()
+            try:
+                line_bytes = await proc.stderr.readline()
+            except Exception as e:
+                logger.error("opencode stderr stream aborted: %s: %s", type(e).__name__, e)
+                break
             if not line_bytes:
                 break
             decoded = line_bytes.decode("utf-8", errors="replace").rstrip()

@@ -1,16 +1,22 @@
-"""Acceptance matrix for /pin and /unpin. Run: venv/bin/python3 -m evolution.test_pin_command"""
-import asyncio
+"""Acceptance matrix for set_policy_pinned().
+
+The /pin and /unpin Telegram commands were removed. Pinning is now a
+maintenance operation callable from Python only, and set_policy_pinned()
+remains the single read/write path for a policy's pinned flag — so its
+guarantees (status guard, idempotence, field immutability, lifecycle exemption)
+still need covering.
+
+Run: venv/bin/python3 -m evolution.test_pin_command
+"""
 import json
 import shutil
 import tempfile
+import time
 from pathlib import Path
-from types import SimpleNamespace
 
 from evolution import gate, lifecycle
 
-# Fictional ids. The real admin list lives in .env and is never checked in —
-# this repo is public, and a Telegram user id is a personal identifier.
-ADMIN, OUTSIDER = 100000001, 999000111
+ACTOR = 100000001          # fictional; the real admin list is never checked in
 IMMUTABLE = ("summary", "root_cause", "evidence", "version", "created_at", "id")
 
 _results = []
@@ -22,7 +28,7 @@ def check(name, cond):
 
 
 def make_policy(path: Path, pid: str, status="active", pinned=False, idle_days=0):
-    now = int(__import__("time").time())
+    now = int(time.time())
     path.write_text(json.dumps({
         "id": pid, "summary": "Verify before reporting success.",
         "root_cause": "Reported done on edit success.",
@@ -35,89 +41,54 @@ def make_policy(path: Path, pid: str, status="active", pinned=False, idle_days=0
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-async def fake_call(handler, uid, args, sent: list):
-    """Drive the real handler with a minimal Update/Context double."""
-    update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=uid),
-        message=SimpleNamespace(message_id=1),
-    )
-    context = SimpleNamespace(args=args)
-    import bot as botmod
-    orig = botmod.send_formatted_reply
-
-    async def capture(update, context, text, reply_to_message_id=None, **kw):
-        sent.append(text)
-    botmod.send_formatted_reply = capture
-    try:
-        await handler(update, context)
-    finally:
-        botmod.send_formatted_reply = orig
-
-
 def main():
     tmp = Path(tempfile.mkdtemp())
-    orig_pol, orig_life = gate.POLICIES_DIR, lifecycle.POLICIES_DIR
+    orig_pol, orig_life, orig_arch = gate.POLICIES_DIR, lifecycle.POLICIES_DIR, lifecycle.ARCHIVE_DIR
     gate.POLICIES_DIR = lifecycle.POLICIES_DIR = tmp / "policies"
     gate.POLICIES_DIR.mkdir(parents=True)
     lifecycle.ARCHIVE_DIR = tmp / "policies/.archive"
     lifecycle.ARCHIVE_DIR.mkdir(parents=True)
-
-    import bot as botmod
-    import config as configmod
-    # Test against fixtures, not the real .env. Both gates matter: cmd_pin checks
-    # is_authorized() before is_policy_admin(), so patching only the admin set
-    # would make every case fail at the outer gate.
-    orig_admins, orig_allowed = configmod.POLICY_ADMIN_IDS, configmod.ALLOWED_USER_IDS
-    configmod.POLICY_ADMIN_IDS = {ADMIN}
-    configmod.ALLOWED_USER_IDS = {ADMIN, OUTSIDER}
     try:
         active = gate.POLICIES_DIR / "rule_active.json"
         make_policy(active, "rule_active", idle_days=45)          # stale-eligible
         make_policy(gate.POLICIES_DIR / "rule_arch.json", "rule_arch", status="archived")
         before = json.loads(active.read_text())
 
-        print("=== Authorization ===")
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_pin, OUTSIDER, ["rule_active"], sent))
-        unchanged = json.loads(active.read_text()) == before
-        check("unauthorized user rejected, file unchanged", unchanged and not json.loads(active.read_text())["pinned"])
+        print("=== Input validation ===")
+        ok, msg = gate.set_policy_pinned("", True, actor=ACTOR)
+        check("empty rule ID rejected", not ok and "無效" in msg)
 
-        print("=== Argument handling ===")
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_pin, ADMIN, [], sent))
-        check("missing rule ID -> usage error", sent and "用法" in sent[0])
+        ok, msg = gate.set_policy_pinned("一定要用繁體中文回答我", True, actor=ACTOR)
+        check("natural language rejected, never treated as rule content",
+              not ok and "無效" in msg)
 
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_pin, ADMIN, ["rule_nope"], sent))
-        check("unknown rule ID rejected", sent and "找不到" in sent[0])
-
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_pin, ADMIN, ["p_1789_test-rule"], sent))
-        check("proposal ID rejected", sent and "找不到" in sent[0])
-
-        ok, msg = gate.set_policy_pinned("../../../etc/passwd", True, actor=ADMIN)
+        ok, msg = gate.set_policy_pinned("../../../etc/passwd", True, actor=ACTOR)
         check("path traversal rejected", not ok and "無效" in msg)
 
+        ok, msg = gate.set_policy_pinned("rule_nope", True, actor=ACTOR)
+        check("unknown rule ID rejected", not ok and "找不到" in msg)
+
+        ok, msg = gate.set_policy_pinned("p_1789_test-rule", True, actor=ACTOR)
+        check("proposal ID rejected", not ok and "找不到" in msg)
+
         print("=== Status guard ===")
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_pin, ADMIN, ["rule_arch"], sent))
+        ok, msg = gate.set_policy_pinned("rule_arch", True, actor=ACTOR)
         arch = json.loads((gate.POLICIES_DIR / "rule_arch.json").read_text())
-        check("archived policy rejected, still unpinned", sent and "archived" in sent[0] and not arch["pinned"])
+        check("archived policy rejected, still unpinned",
+              not ok and "archived" in msg and not arch["pinned"])
 
         print("=== Pin / unpin ===")
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_pin, ADMIN, ["rule_active"], sent))
+        ok, msg = gate.set_policy_pinned("rule_active", True, actor=ACTOR)
         d = json.loads(active.read_text())
-        check("authorized pin succeeds", d["pinned"] is True)
+        check("pin succeeds", ok and d["pinned"] is True)
         check("message reports id, transition, version, path",
-              sent and all(t in sent[0] for t in ("rule_active", "`False` → `True`", "version", str(active))))
+              all(t in msg for t in ("rule_active", "`False` → `True`", "version", str(active))))
         check("version not bumped", d["version"] == before["version"])
         check("immutable fields untouched", all(d[k] == before[k] for k in IMMUTABLE))
 
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_pin, ADMIN, ["rule_active"], sent))
+        ok, msg = gate.set_policy_pinned("rule_active", True, actor=ACTOR)
         d2 = json.loads(active.read_text())
-        check("already pinned -> no-op", sent and "已經係 pinned" in sent[0] and d2 == d)
+        check("already pinned -> no-op, zero writes", ok and "已經係 pinned" in msg and d2 == d)
 
         print("=== Lifecycle interaction ===")
         stats = lifecycle.run_lifecycle_pass()
@@ -125,36 +96,26 @@ def main():
         check("pinned policy exempt from staleness",
               stats["skipped_pinned"] >= 1 and d3["status"] == "active")
 
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_unpin, ADMIN, ["rule_active"], sent))
+        ok, msg = gate.set_policy_pinned("rule_active", False, actor=ACTOR)
         d4 = json.loads(active.read_text())
-        check("authorized unpin succeeds", d4["pinned"] is False)
+        check("unpin succeeds", ok and d4["pinned"] is False)
         check("unpin leaves immutable fields alone", all(d4[k] == before[k] for k in IMMUTABLE))
         check("policy not deleted", active.exists())
 
-        sent = []
-        asyncio.run(fake_call(botmod.cmd_unpin, ADMIN, ["rule_active"], sent))
-        check("already unpinned -> no-op", sent and "本來就唔係 pinned" in sent[0])
+        ok, msg = gate.set_policy_pinned("rule_active", False, actor=ACTOR)
+        check("already unpinned -> no-op", ok and "本來就唔係 pinned" in msg)
 
         stats2 = lifecycle.run_lifecycle_pass()
         d5 = json.loads(active.read_text())
         check("after unpin, lifecycle applies again",
               stats2["skipped_pinned"] == 0 and d5["status"] == "stale")
 
-        print("=== Handler registration ===")
-        # Asserts against the same register_handlers() main() calls, not a copy.
-        collected = []
-        botmod.register_handlers(SimpleNamespace(add_handler=collected.append))
-        names = set()
-        for h in collected:
-            names |= {str(c) for c in (getattr(h, "commands", None) or set())}
-        check("/pin and /unpin registered", {"pin", "unpin"} <= names)
-        check("existing handlers still registered",
-              {"start", "approve", "reject", "help"} <= names and len(collected) > 20)
+        print("=== Command surface removed ===")
+        import bot as botmod
+        check("no cmd_pin / cmd_unpin handlers remain",
+              not hasattr(botmod, "cmd_pin") and not hasattr(botmod, "cmd_unpin"))
     finally:
-        gate.POLICIES_DIR, lifecycle.POLICIES_DIR = orig_pol, orig_life
-        configmod.POLICY_ADMIN_IDS = orig_admins
-        configmod.ALLOWED_USER_IDS = orig_allowed
+        gate.POLICIES_DIR, lifecycle.POLICIES_DIR, lifecycle.ARCHIVE_DIR = orig_pol, orig_life, orig_arch
         shutil.rmtree(tmp, ignore_errors=True)
 
     print("\n" + (f"ALL PASS ({len(_results)})" if all(_results)

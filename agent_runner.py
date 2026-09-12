@@ -30,6 +30,10 @@ from config import (
 
 logger = logging.getLogger("agy-tg-bot.runner")
 
+# Per-line ceiling for subprocess NDJSON streams. Well above any single event a
+# turn produces, while still bounding memory if a backend goes haywire.
+STREAM_LINE_LIMIT = 32 * 1024 * 1024
+
 from session_store import (
     user_conversations,
     user_models,
@@ -307,6 +311,13 @@ async def _run_agy_turn(
         stderr=asyncio.subprocess.PIPE,
         cwd=WORKSPACE_DIR if os.path.isdir(WORKSPACE_DIR) else None,
         env=env,
+        # asyncio's default StreamReader limit is 64 KiB. agy emits one NDJSON
+        # object per line, and a single line — the result event of a long turn,
+        # or a large tool observation — routinely exceeds that. readline() then
+        # raises, the stream is abandoned mid-flight, the terminating `result`
+        # event never arrives, and the caller falls back to echoing raw stdout.
+        # That is how /compact once returned the event stream as its "summary".
+        limit=STREAM_LINE_LIMIT,
     )
 
     _active_processes[user_id] = proc
@@ -320,7 +331,12 @@ async def _run_agy_turn(
         while True:
             try:
                 line_bytes = await proc.stdout.readline()
-            except Exception:
+            except Exception as e:
+                # Never swallow this. Abandoning the stream here means the
+                # `result` event is lost and the turn degrades into a raw dump,
+                # which looks like a model failure rather than a read failure.
+                logger.error("stdout stream aborted for user %s: %s: %s",
+                             user_id, type(e).__name__, e)
                 break
             if not line_bytes:
                 break
@@ -443,8 +459,36 @@ async def _run_agy_turn(
         duration = result_data.get("duration_seconds", 0.0)
         raw_usage = result_data.get("usage")
     else:
-        # Fallback to parsing raw stdout if result event was missing
+        # Fallback when the result event was missing. stdout is NDJSON, so
+        # json.loads() over the whole buffer always fails once there is more
+        # than one line — which used to drop straight through to echoing the
+        # raw event stream at the user. Recover the result line by line first,
+        # and if there is genuinely no result, salvage the streamed text_delta
+        # fragments rather than dumping protocol noise.
         stdout_str = "\n".join(stdout_raw_lines).strip()
+        recovered, deltas = None, []
+        for line in stdout_raw_lines:
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("event") == "result" and isinstance(obj.get("result"), dict):
+                recovered = obj["result"]
+            elif obj.get("event") == "step_update":
+                frag = (obj.get("step_update") or {}).get("text_delta")
+                if frag:
+                    deltas.append(frag)
+
+        if recovered:
+            logger.warning("Recovered result event from raw stdout for user %s", user_id)
+            stdout_str = json.dumps(recovered)
+        elif deltas:
+            logger.warning("No result event for user %s; reassembled %d streamed fragments",
+                           user_id, len(deltas))
+            stdout_str = json.dumps({"response": "".join(deltas)})
+
         try:
             parsed_json = json.loads(stdout_str)
             if isinstance(parsed_json, dict):

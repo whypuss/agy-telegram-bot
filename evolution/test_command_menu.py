@@ -59,14 +59,8 @@ def main():
     import bot as botmod
 
     print("=== Menu / handler consistency ===")
-    menu = botmod.build_command_menu(include_admin=True)
+    menu = botmod.build_command_menu()
     menu_names = [c.command for c in menu]
-
-    public_names = [c.command for c in botmod.build_command_menu(include_admin=False)]
-    check("public menu hides admin-only commands",
-          not ({"pin", "unpin"} & set(public_names)), str(public_names))
-    check("public menu keeps every non-admin command",
-          set(public_names) == set(menu_names) - {"pin", "unpin"}, str(public_names))
 
     collected = []
     botmod.register_handlers(SimpleNamespace(add_handler=collected.append))
@@ -74,8 +68,8 @@ def main():
     for h in collected:
         handler_names |= {str(c) for c in (getattr(h, "commands", None) or set())}
 
-    check("getMyCommands payload contains pin and unpin",
-          {"pin", "unpin"} <= set(menu_names), str(menu_names))
+    check("removed commands are absent from the menu",
+          not ({"pin", "unpin"} & set(menu_names)), str(menu_names))
     check("every menu command has a registered handler",
           set(menu_names) <= handler_names, str(set(menu_names) - handler_names))
     check("original commands all still present",
@@ -83,8 +77,6 @@ def main():
     check("original menu order preserved",
           [n for n in menu_names if n in ORIGINAL_MENU] == ORIGINAL_MENU, str(menu_names))
     check("no duplicate menu entries", len(menu_names) == len(set(menu_names)))
-    check("pin/unpin descriptions marked admin-only",
-          all("管理員限定" in c.description for c in menu if c.command in ("pin", "unpin")))
     check("every menu name is its handler's first alias",
           all(aliases[0] in menu_names for aliases, _, d in botmod.COMMAND_SPEC if d))
     check("descriptions within Telegram's 256-char limit",

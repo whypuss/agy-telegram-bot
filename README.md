@@ -160,30 +160,20 @@ python bot.py
 | `/help` | 顯示完整功能說明卡片 |
 | `/proposals` | 📜 查看待審批的自我進化提案 |
 | `/approve <id>` / `/reject <id>` | 批准或駁回提案 |
-| `/pin <rule_id>` | 📌 **[管理員限定]** 釘住 policy，令其免疫 staleness 清理 |
-| `/unpin <rule_id>` | 📍 **[管理員限定]** 解除釘住，恢復正常 lifecycle |
 
 ---
 
 ## 🧬 自我進化：證據門檻與 Policy 管理
 
-### ⚠️ `POLICY_ADMIN_IDS` 是 Breaking Change
-
-`/pin` 與 `/unpin` 由**獨立的管理員白名單**控管，**不會繼承 `ALLOWED_USER_IDS`**。升級後若未在 `.env` 設定，這兩個指令會對**所有人**拒絕（fail closed）：
-
-```bash
-POLICY_ADMIN_IDS=123456789        # 你的 Telegram User ID
-```
-
-未設定、留空、或格式錯誤都解析成空集合。**一個無效項目會令整個值作廢** —— `"123,oops,456"` 得到空集合而非 `{123, 456}`，避免留下半解析的白名單。Bot 其餘功能不受影響，啟動時會記錄警告。
-
-### 為何 Pin 需要獨立授權
+### Pin 是人的動作，不是管線產物
 
 Pinned policy **永久免疫** staleness cleanup（`lifecycle.py` 中 30 天 stale / 90 天 archive 對其完全跳過）。一條錯誤的規則若被釘住，會永遠注入每個新對話。因此：
 
 - **Evidence gate 永不自動 pin。** 通過門檻的 candidate 得到 `active`，不是 `pinned`。
 - `evaluator` 是 LLM，可能產出 `pinned: true`；該欄位在 dispatch 時被硬性清除，只留一行 log。
-- Pin 是**人的動作**，只能經 `/pin` 由白名單成員執行。
+- Telegram 沒有 pin 指令。改變 `pinned` 只能由人在本機呼叫 `evolution.gate.set_policy_pinned()`，這也是唯一讀寫該欄位的路徑。
+
+注意 `pinned` 目前保護範圍有限：`build_memory_context()` 會在每次新對話 `touch_policy()` 全部 active policy，因此只要 bot 有在使用，`last_used_at` 就不會老化，30 天 stale 幾乎不會觸發。
 
 ### 證據門檻（Evidence Gate）
 

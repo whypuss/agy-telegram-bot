@@ -47,9 +47,6 @@ from config import (
     CACHE_DIR,
     is_opencode_model,
     is_authorized,
-    is_policy_admin,
-    POLICY_ADMIN_IDS,
-    POLICY_ADMIN_CONFIG_ERROR,
 )
 from formatter import (
     format_markdown_v2,
@@ -99,7 +96,6 @@ from evolution import (
     reject_proposal,
     list_pending_proposals,
     get_proposal,
-    set_policy_pinned,
 )
 
 # ---------------------------------------------------------------------------
@@ -1309,60 +1305,6 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-async def _cmd_set_pinned(update: Update, context: ContextTypes.DEFAULT_TYPE, pinned: bool) -> None:
-    """Shared body for /pin and /unpin.
-
-    Deliberately thin: it verifies who is asking, extracts one exact rule id, and
-    hands those plus the target boolean to set_policy_pinned(). No policy content
-    from Telegram is read, parsed or written here.
-    """
-    uid = update.effective_user.id
-    verb = "pin" if pinned else "unpin"
-
-    if not is_authorized(uid):
-        return
-    if not is_policy_admin(uid):
-        logger.warning("⛔ [%s] denied for non-admin uid=%s", verb, uid)
-        await send_formatted_reply(
-            update=update,
-            context=context,
-            text=f"⛔ `/{verb}` 只限 policy admin。\n你的 User ID: `{uid}`",
-            reply_to_message_id=update.message.message_id if update.message else None,
-        )
-        return
-
-    args = context.args or []
-    if len(args) != 1:
-        await send_formatted_reply(
-            update=update,
-            context=context,
-            text=(f"⚠️ 用法：`/{verb} <rule_id>`\n"
-                  f"例如：`/{verb} rule_evidence-discipline`\n"
-                  f"只接受精確 rule ID，唔支援模糊搜尋或 summary。"),
-            reply_to_message_id=update.message.message_id if update.message else None,
-        )
-        return
-
-    success, msg = set_policy_pinned(args[0].strip(), pinned, actor=uid)
-    logger.info("📌 [%s] uid=%s rule=%s -> %s", verb, uid, args[0].strip()[:64], success)
-    await send_formatted_reply(
-        update=update,
-        context=context,
-        text=msg,
-        reply_to_message_id=update.message.message_id if update.message else None,
-    )
-
-
-async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /pin <rule_id> — grant a policy permanent staleness exemption."""
-    await _cmd_set_pinned(update, context, pinned=True)
-
-
-async def cmd_unpin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /unpin <rule_id> — revoke it and restore normal lifecycle."""
-    await _cmd_set_pinned(update, context, pinned=False)
-
-
 async def cmd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /reject <id> to reject a pending proposal."""
     uid = update.effective_user.id
@@ -1523,24 +1465,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def post_init(app: Application) -> None:
     """Register slash commands with Telegram to enable auto-completion."""
-    # Public list first, then a per-admin chat scope that adds /pin and /unpin.
-    # Chat scope outranks default, so admins see everything and nobody else sees
-    # commands they cannot run.
-    public = build_command_menu(include_admin=False)
+    commands = build_command_menu()
     try:
-        await app.bot.set_my_commands(public)
-        logger.info("Telegram bot commands registered: %d public", len(public))
+        await app.bot.set_my_commands(commands)
+        logger.info("Telegram bot commands registered: %d", len(commands))
     except Exception as e:
         logger.warning("Failed to register bot commands: %s", e)
 
-    admin_menu = build_command_menu(include_admin=True)
-    for admin_id in POLICY_ADMIN_IDS:
-        try:
-            from telegram import BotCommandScopeChat
-            await app.bot.set_my_commands(admin_menu, scope=BotCommandScopeChat(chat_id=admin_id))
-            logger.info("📌 Admin command scope set for %s: %d commands", admin_id, len(admin_menu))
-        except Exception as e:
-            logger.warning("Failed to set admin command scope for %s: %s", admin_id, e)
 
     # Initialize Evolution Worker background daemon
     try:
@@ -1569,15 +1500,6 @@ def main() -> None:
     if not ALLOWED_USER_IDS:
         logger.warning("⚠️ ALLOWED_USER_IDS 未設定 — 所有人皆能使用此 Bot！")
 
-    if not POLICY_ADMIN_IDS:
-        logger.warning(
-            "⚠️ %s — /pin 同 /unpin 會對所有人拒絕（fail closed）。"
-            "要啟用請喺 .env 設定 POLICY_ADMIN_IDS=<telegram_user_id>。"
-            "Bot 其餘功能不受影響。",
-            POLICY_ADMIN_CONFIG_ERROR or "POLICY_ADMIN_IDS 為空",
-        )
-    else:
-        logger.info("📌 Policy admin: %s", POLICY_ADMIN_IDS)
 
     builder = (
         ApplicationBuilder()
@@ -1624,8 +1546,6 @@ COMMAND_SPEC = [
     (["proposals"],            cmd_proposals, "📜 查看待審批的自我進化提案 (Policies / Skills)"),
     (["approve"],              cmd_approve,   None),
     (["reject"],               cmd_reject,    None),
-    (["pin"],                  cmd_pin,       "📌 [管理員限定] 釘住 policy,免疫 staleness 清理"),
-    (["unpin"],                cmd_unpin,     "📍 [管理員限定] 解除釘住,恢復正常 lifecycle"),
     (["compact", "summarize"], cmd_compact,   "📦 壓縮當前會話上下文（瘦身並保留關鍵記憶）"),
     (["status"],               cmd_status,    "📈 查看系統狀態與當前會話"),
     (["reset", "new"],         cmd_reset,     "🔄 重置會話記憶（開啟新對話）"),
@@ -1636,23 +1556,13 @@ COMMAND_SPEC = [
 ]
 
 
-ADMIN_ONLY_COMMANDS = {"pin", "unpin"}
-
-
-def build_command_menu(include_admin: bool = True) -> list:
+def build_command_menu() -> list:
     """Build the Telegram menu from COMMAND_SPEC.
 
     Always uses the first alias, which is the same string register_handlers()
     binds — the menu can never advertise a command that is not handled.
-    With include_admin=False the admin-only entries are omitted, which is what
-    the default scope gets: Telegram menus have no per-user filtering, so the
-    only way to keep /pin out of a non-admin's list is to not send it to them.
     """
-    return [
-        BotCommand(aliases[0], desc)
-        for aliases, _, desc in COMMAND_SPEC
-        if desc and (include_admin or aliases[0] not in ADMIN_ONLY_COMMANDS)
-    ]
+    return [BotCommand(aliases[0], desc) for aliases, _, desc in COMMAND_SPEC if desc]
 
 
 def register_handlers(app) -> None:
