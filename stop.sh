@@ -1,8 +1,11 @@
 #!/bin/bash
-PLIST="$HOME/Library/LaunchAgents/com.whypuss.agy-telegram-bot.plist"
+LABEL="com.whypuss.agy-telegram-bot"
+UID_NUM="$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
 if [ -f "$PLIST" ]; then
-    echo "Unloading launchd service..."
-    launchctl unload "$PLIST" 2>/dev/null || true
+    echo "Stopping launchd service..."
+    launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
 fi
-pkill -f "python3 bot.py" 2>/dev/null || true
+pkill -f "python.*bot\.py" 2>/dev/null || true
 echo "Bot stopped."

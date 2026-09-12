@@ -294,9 +294,17 @@ async def run_opencode_turn(
     stderr_task = asyncio.create_task(_stream_stderr())
     stdout_task = asyncio.create_task(_stream_stdout())
 
+    async def _wait_oc_completion():
+        await proc.wait()
+        # Give streams up to 1.5s to flush remaining buffers
+        try:
+            await asyncio.wait_for(asyncio.gather(stderr_task, stdout_task), timeout=1.5)
+        except asyncio.TimeoutError:
+            pass
+
     try:
         await asyncio.wait_for(
-            asyncio.gather(stderr_task, stdout_task, proc.wait()),
+            _wait_oc_completion(),
             timeout=OPENCODE_TIMEOUT + 15,
         )
     except asyncio.CancelledError:
@@ -312,6 +320,11 @@ async def run_opencode_turn(
             stderr_task.cancel()
         if not stdout_task.done():
             stdout_task.cancel()
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         _oc_active_processes.pop(user_id, None)
 
     # Process was deliberately terminated (user cancel / correction steer):

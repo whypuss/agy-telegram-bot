@@ -114,12 +114,13 @@ def cleanup_cache(max_age_seconds: int = 86400) -> int:
 # ---------------------------------------------------------------------------
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
 _DOC_EXTS = {".pdf", ".csv", ".json", ".zip", ".tar", ".gz", ".txt", ".py", ".md", ".html", ".docx", ".xlsx"}
 
 def detect_local_files_in_response(text: str) -> List[Tuple[str, str]]:
     """
     Scan agent response for references to existing local files or images.
-    Returns a list of (media_type, file_path_str) where media_type is 'image' or 'document'.
+    Returns a list of (media_type, file_path_str) where media_type is 'image', 'video' or 'document'.
     """
     if not text:
         return []
@@ -133,13 +134,15 @@ def detect_local_files_in_response(text: str) -> List[Tuple[str, str]]:
         if p.exists() and p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
             found_files.append(("image", str(p)))
 
-    # 2. Match absolute paths on new lines or quotes: e.g. `/Users/.../output.png` or `file:///...`
+    # 2. Match absolute paths on new lines or quotes: e.g. `/Users/.../output.mp4` or `file:///...`
     for match in re.finditer(r'(?:file://)?(/Users/[^\s`\'"<>)]+|/[a-zA-Z0-9_\-./]+[a-zA-Z0-9_\-]\.[a-zA-Z0-9]{2,5})', text):
         path_str = match.group(1).strip()
         p = Path(path_str)
         if p.exists() and p.is_file():
             ext = p.suffix.lower()
-            if ext in _IMAGE_EXTS and ("image", str(p)) not in found_files:
+            if ext in _VIDEO_EXTS and ("video", str(p)) not in found_files:
+                found_files.append(("video", str(p)))
+            elif ext in _IMAGE_EXTS and ("image", str(p)) not in found_files:
                 found_files.append(("image", str(p)))
             elif ext in _DOC_EXTS and ("document", str(p)) not in found_files:
                 # Limit sending documents to intentional artifact files
