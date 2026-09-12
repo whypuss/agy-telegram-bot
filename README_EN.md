@@ -161,6 +161,86 @@ python bot.py
 | `/steer <text>` | Abort the current task, discard accumulated corrections, and restart with a new instruction |
 | `/clear` | Purge local temporary media cache files |
 | `/help` | Display comprehensive command and feature guide |
+| `/proposals` | 📜 List self-evolution proposals awaiting approval |
+| `/approve <id>` / `/reject <id>` | Approve or reject a proposal |
+
+---
+
+## 🧬 Self-Evolution: Evidence Gate and Policy Management
+
+### Policies are managed by hand; nothing ages automatically
+
+`POLICY_AUTO_LIFECYCLE_ENABLED = False`. The only signal available is that a
+rule was injected into a prompt — which is not evidence it applied to the task,
+and not evidence it changed the output:
+
+```
+injected  !=  matched  !=  affected_output
+```
+
+Treating injection as usage kept the idle timer permanently reset, so automatic
+ageing could never fire. Rather than keep a lifecycle that reports work it is
+not doing, it stays off until there is a real relevance signal.
+
+- Policy state is human-managed: `active` / `disabled`; deletion is removing the file.
+- Injection writes only `last_injected_at`, purely observational, read by nothing.
+- `pinned` and `last_used_at` remain in the schema but **do not affect behaviour**,
+  reserved as a landing place for a future signal.
+- **The evidence gate never pins.** Clearing it earns `active`. The evaluator is
+  an LLM and may emit `pinned: true`; that field is stripped at dispatch.
+
+### Policy identity and revision
+
+A policy's filename derives from the candidate's `rule_id` (`rule_<slug>.json`),
+not from the proposal id. Revising the same rule therefore **updates the existing
+file**: `version` increments, `created_at` carries forward, a human-granted
+`pinned` survives, and only one policy is injected.
+
+If an existing policy file cannot be parsed, approval **aborts** rather than
+overwriting it — overwriting would reset `version` to 1, reset `created_at` to
+now, and drop the pin. The proposal stays `pending_approval` so it can be
+retried once the file is repaired.
+
+Unparseable proposals are listed by filename in `/proposals`. Excluding them
+silently made the bot report "no proposals pending" while an unapprovable one
+sat on disk — a false statement, not merely a missing one.
+
+### Evidence Gate
+
+A candidate that would become a standing rule (`policy_proposal` / `skill_patch`)
+must clear the deterministic checks in `evolution/evidence.py`. The invariant:
+
+> No candidate may be promoted unless its evidence records an actual
+> verification that exercises the affected behavior; successful execution alone
+> is insufficient.
+
+Rejected, each with its own diagnostic code:
+
+| Case | Code |
+|---|---|
+| No evidence / blank | `missing_evidence` |
+| Subjective claim only ("fixed", "works now") | `subjective_only` |
+| Exit code 0 / "command succeeded" only | `exit_code_only` |
+| Generic check only (lint / import / JSON parse) | `generic_check_only` |
+| Concrete output unrelated to the affected behavior | `unrelated_evidence` |
+
+The gate runs at dispatch and again at compile, so a proposal hand-edited on
+disk to strip its evidence cannot be approved. The compiler preserves validated
+evidence byte-for-byte and **never supplies, infers, or improves it**.
+
+```bash
+venv/bin/python3 -m evolution.test_evidence_gate    # evidence matrix, policy identity, injection != usage
+venv/bin/python3 -m evolution.test_pin_command      # set_policy_pinned() guards and idempotence
+venv/bin/python3 -m evolution.test_command_menu     # command menu / handler consistency
+venv/bin/python3 -m evolution.test_stream_limit     # NDJSON stream limit, watchdog restart contract
+```
+
+### The background reviewer needs an auxiliary API key
+
+`evolution/evaluator.py` requires `SENSENOVA_API_KEY` or `OPENROUTER_API_KEY`.
+With neither set the background worker **does not start** (avoiding a pointless
+poll loop); review jobs queue durably and are processed once a key is
+configured. Everything else is unaffected.
 
 ---
 
