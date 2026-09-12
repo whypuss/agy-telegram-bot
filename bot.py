@@ -280,14 +280,16 @@ async def process_agent_turn(
     current_model = get_user_model(uid)
     backend_label = "💻 本地 OpenCode" if is_opencode_model(current_model) else "⚡ Antigravity"
 
-    # Send initial status message
-    status_msg = await context.bot.send_message(
-        chat_id=chat.id,
-        text=f"⏳ *已接收請求，Agent 啟動中\\.\\.\\.*\n🔌 後端: {format_markdown_v2(backend_label)}\n📌 模型: `{format_markdown_v2(current_model)}`",
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_to_message_id=original_message_id,
-        message_thread_id=thread_id,
-        reply_markup=build_cancel_keyboard(),
+    # Launch initial status message concurrently with agent startup (saves ~300-500ms startup RTT)
+    status_msg_task = asyncio.create_task(
+        context.bot.send_message(
+            chat_id=chat.id,
+            text=f"⏳ *已接收請求，Agent 啟動中\\.\\.\\.*\n🔌 後端: {format_markdown_v2(backend_label)}\n📌 模型: `{format_markdown_v2(current_model)}`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_to_message_id=original_message_id,
+            message_thread_id=thread_id,
+            reply_markup=build_cancel_keyboard(),
+        )
     )
 
     start_time = time.time()
@@ -344,6 +346,7 @@ async def process_agent_turn(
                 f"{format_markdown_v2(progress_block)}"
             )
             try:
+                status_msg = await status_msg_task
                 await status_msg.edit_text(
                     text=msg_text,
                     parse_mode=ParseMode.MARKDOWN_V2,
@@ -352,6 +355,7 @@ async def process_agent_turn(
             except Exception:
                 # Fallback to plain text on Markdown edit error
                 try:
+                    status_msg = await status_msg_task
                     await status_msg.edit_text(
                         text=f"⏳ Agent 處理中... ({elapsed})\n🔌 後端: {backend_label}\n📌 模型: {current_model}\n\n📋 執行過程：\n{progress_block}",
                         reply_markup=build_cancel_keyboard(),
@@ -386,6 +390,7 @@ async def process_agent_turn(
         # Turn was interrupted by an incoming correction — skip the final
         # answer; the merged re-run below delivers the integrated result.
         try:
+            status_msg = await status_msg_task
             await status_msg.edit_text(
                 text="🔄 已收到修正指示，正在整合原始任務與所有修正重新執行…",
                 reply_markup=None,
@@ -434,21 +439,6 @@ async def process_agent_turn(
             final_status_text = f"✅ *任務完成* \\(耗時 {elapsed_total}{format_markdown_v2(token_str)}\\)"
             plain_final_text = f"✅ 任務完成 (耗時 {elapsed_total}{token_str})"
 
-        try:
-            await status_msg.edit_text(
-                text=final_status_text,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=None,
-            )
-        except Exception:
-            try:
-                await status_msg.edit_text(
-                    text=plain_final_text,
-                    reply_markup=None,
-                )
-            except Exception:
-                pass
-
         # Append usage footer directly to the reply text if available
         final_reply_text = reply_text
         if turn_usage and turn_usage.get("total_tokens"):
@@ -469,7 +459,31 @@ async def process_agent_turn(
 
             final_reply_text = f"{reply_text}{usage_footer}"
 
-        # Send response text
+        # OPTIMIZATION: Update status card concurrently in background so final reply text
+        # is delivered immediately to the user without waiting for Telegram edit network RTT.
+        async def _finish_status_card():
+            try:
+                status_msg = await status_msg_task
+                try:
+                    await status_msg.edit_text(
+                        text=final_status_text,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    try:
+                        await status_msg.edit_text(
+                            text=plain_final_text,
+                            reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        status_finish_task = asyncio.create_task(_finish_status_card())
+
+        # Send response text immediately
         await send_formatted_reply(
             update=update,
             context=context,
@@ -485,6 +499,11 @@ async def process_agent_turn(
             response_text=reply_text,
             thread_id=thread_id,
         )
+
+        try:
+            await status_finish_task
+        except Exception:
+            pass
 
     # If corrections arrived while this task was running, re-run immediately:
     # merge the original task with every accumulated correction into ONE

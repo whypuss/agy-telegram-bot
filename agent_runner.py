@@ -399,24 +399,21 @@ async def _run_agy_turn(
         for t in pending:
             t.cancel()
 
-        # If result was already received, give process 2s to cleanly exit
-        if proc.returncode is None:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+        # If result event was received, the answer and usage are already parsed.
+        # Cleanly terminate the subprocess in background and return immediately.
+        if result_event.is_set():
+            if proc.returncode is None:
                 try:
                     proc.terminate()
-                    await asyncio.wait_for(proc.wait(), timeout=1.5)
                 except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    pass
+            return
 
-        # Give streams up to 1.5s to flush remaining buffers
+        # Otherwise, process exited before result event (fallback / error case).
+        # Give streams up to 0.5s to flush remaining buffers for fallback parsing.
         try:
-            await asyncio.wait_for(asyncio.gather(stderr_task, stdout_task), timeout=1.5)
-        except asyncio.TimeoutError:
+            await asyncio.wait_for(asyncio.gather(stderr_task, stdout_task), timeout=0.5)
+        except (asyncio.TimeoutError, Exception):
             pass
 
     try:
