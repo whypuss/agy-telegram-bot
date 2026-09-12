@@ -1546,7 +1546,12 @@ async def post_init(app: Application) -> None:
     try:
         set_bot_instance(app.bot)
         asyncio.create_task(start_evolution_worker())
-        logger.info("🚀 Hermes-inspired Evolution Worker background loop started")
+        # create_task only means "scheduled". The worker declines to run without
+        # an auxiliary API key, so announcing success here would contradict the
+        # warning it logs a moment later.
+        from evolution.worker import evaluator_available
+        if evaluator_available():
+            logger.info("🚀 Hermes-inspired Evolution Worker background loop scheduled")
     except Exception as e:
         logger.error("Failed to start Evolution Worker: %s", e)
 

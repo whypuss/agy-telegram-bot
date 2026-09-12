@@ -158,6 +158,62 @@ python bot.py
 | `/steer <內容>` | 中止目前任務，清空已累積修正並以新指示立即重跑 |
 | `/clear` | 清理本機快取的多模態暫存檔案 |
 | `/help` | 顯示完整功能說明卡片 |
+| `/proposals` | 📜 查看待審批的自我進化提案 |
+| `/approve <id>` / `/reject <id>` | 批准或駁回提案 |
+| `/pin <rule_id>` | 📌 **[管理員限定]** 釘住 policy，令其免疫 staleness 清理 |
+| `/unpin <rule_id>` | 📍 **[管理員限定]** 解除釘住，恢復正常 lifecycle |
+
+---
+
+## 🧬 自我進化：證據門檻與 Policy 管理
+
+### ⚠️ `POLICY_ADMIN_IDS` 是 Breaking Change
+
+`/pin` 與 `/unpin` 由**獨立的管理員白名單**控管，**不會繼承 `ALLOWED_USER_IDS`**。升級後若未在 `.env` 設定，這兩個指令會對**所有人**拒絕（fail closed）：
+
+```bash
+POLICY_ADMIN_IDS=123456789        # 你的 Telegram User ID
+```
+
+未設定、留空、或格式錯誤都解析成空集合。**一個無效項目會令整個值作廢** —— `"123,oops,456"` 得到空集合而非 `{123, 456}`，避免留下半解析的白名單。Bot 其餘功能不受影響，啟動時會記錄警告。
+
+### 為何 Pin 需要獨立授權
+
+Pinned policy **永久免疫** staleness cleanup（`lifecycle.py` 中 30 天 stale / 90 天 archive 對其完全跳過）。一條錯誤的規則若被釘住，會永遠注入每個新對話。因此：
+
+- **Evidence gate 永不自動 pin。** 通過門檻的 candidate 得到 `active`，不是 `pinned`。
+- `evaluator` 是 LLM，可能產出 `pinned: true`；該欄位在 dispatch 時被硬性清除，只留一行 log。
+- Pin 是**人的動作**，只能經 `/pin` 由白名單成員執行。
+
+### 證據門檻（Evidence Gate）
+
+升格為長期規則的 candidate（`policy_proposal` / `skill_patch`）必須通過 `evolution/evidence.py` 的確定性檢查。核心不變式：
+
+> 沒有任何 candidate 可以升格，除非其 evidence 記錄了一次**實際驗證且該驗證有 exercise 到所宣稱的受影響行為**；單純執行成功並不足夠。
+
+以下會被拒絕，各有獨立診斷碼：
+
+| 情況 | 拒絕碼 |
+|---|---|
+| 無 evidence / 空白 | `missing_evidence` |
+| 只有主觀結論（「已修復」「works now」） | `subjective_only` |
+| 只有 exit code 0 / 「命令成功」 | `exit_code_only` |
+| 只有泛用檢查（lint / import / JSON parse） | `generic_check_only` |
+| 具體輸出但與受影響行為無關 | `unrelated_evidence` |
+
+門檻在 dispatch 與 compile 兩處各檢查一次，因此手動編輯磁碟上的 proposal 抽走 evidence 也無法批准。Compiler 逐字保留已驗證的 evidence，**不會代為生成、推斷或美化**。
+
+執行驗收矩陣：
+
+```bash
+venv/bin/python3 -m evolution.test_evidence_gate
+venv/bin/python3 -m evolution.test_pin_command
+venv/bin/python3 -m evolution.test_command_menu
+```
+
+### 背景 Reviewer 需要輔助 API Key
+
+`evolution/evaluator.py` 需要 `SENSENOVA_API_KEY` 或 `OPENROUTER_API_KEY`。兩者皆未設定時，背景 worker **不會啟動**（避免無意義的輪詢），提案管線靜默停用，其餘功能正常。
 
 ---
 

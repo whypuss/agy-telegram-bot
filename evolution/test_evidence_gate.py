@@ -106,7 +106,53 @@ def run_structural() -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def run_structured_fields() -> bool:
+    """Trigger/Constraint/Verification render when present, and are optional."""
+    print("=== Structured fields ===")
+    ok = True
+    tmp = Path(tempfile.mkdtemp())
+    from evolution import lifecycle
+    import memory_manager
+    orig = lifecycle.POLICIES_DIR
+    lifecycle.POLICIES_DIR = tmp / "policies"
+    lifecycle.POLICIES_DIR.mkdir(parents=True)
+    try:
+        base = {"id": "rule_x", "summary": "Check before restart.", "root_cause": "Blind restart.",
+                "evidence": "systemctl status -> inactive", "pinned": False, "version": 1,
+                "created_at": 1, "last_updated": 1, "last_used_at": 1, "status": "active"}
+
+        # Without the optional fields — must render as a bare single line.
+        (lifecycle.POLICIES_DIR / "rule_x.json").write_text(json.dumps(base), encoding="utf-8")
+        plain = memory_manager.build_memory_context()
+        good = "Check before restart." in plain and "‣ 觸發" not in plain
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  policy without structured fields renders unchanged")
+
+        # With them — must expand into labelled sub-lines.
+        rich = dict(base, trigger="Before restarting any production service",
+                    constraint="Capture current status first",
+                    verification="Re-run status and compare")
+        (lifecycle.POLICIES_DIR / "rule_x.json").write_text(json.dumps(rich), encoding="utf-8")
+        out = memory_manager.build_memory_context()
+        good = all(f"‣ {lbl}: " in out for lbl in ("觸發", "約束", "驗證"))
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  structured fields render as labelled lines")
+
+        # Partial population must not emit empty labels.
+        partial = dict(base, verification="Re-run status and compare")
+        (lifecycle.POLICIES_DIR / "rule_x.json").write_text(json.dumps(partial), encoding="utf-8")
+        out = memory_manager.build_memory_context()
+        good = "‣ 驗證: " in out and "‣ 觸發" not in out and "‣ 約束" not in out
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  partial fields emit only what is set")
+        return ok
+    finally:
+        lifecycle.POLICIES_DIR = orig
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     a, b = run_matrix(), run_structural()
+    b = b and run_structured_fields()
     print("\n" + ("ALL PASS" if a and b else "FAILURES PRESENT"))
     raise SystemExit(0 if a and b else 1)

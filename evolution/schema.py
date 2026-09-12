@@ -20,6 +20,11 @@ class EvolutionCandidate:
     confidence: float                     # Confidence score 0.0 - 1.0
     evidence: Optional[str] = None        # Extracted turn or tool call snippet
     affected_behavior: Optional[str] = None  # What behavior this rule governs; evidence must exercise it
+    # Optional structured form. `summary` stays the single-line rule and remains
+    # the only required field; these sharpen it when the evaluator can fill them.
+    trigger: Optional[str] = None         # When the rule applies
+    constraint: Optional[str] = None      # What is forbidden or required
+    verification: Optional[str] = None    # How to prove compliance
     pinned: bool = False                  # Security hardline, immune to archival. Never set by the pipeline.
     skill_class: Optional[str] = None     # Target class-level skill (e.g. server-operations)
     requires_approval: bool = False       # Policy and Skill always require approval
@@ -36,6 +41,9 @@ class Proposal:
     confidence: float
     created_at: int
     affected_behavior: str = ""
+    trigger: str = ""
+    constraint: str = ""
+    verification: str = ""
     status: ProposalStatus = "pending_approval"
     resolved_at: Optional[int] = None
     approved_by: Optional[int] = None
@@ -52,4 +60,7 @@ class VersionedPolicy:
     last_updated: int
     last_used_at: int
     affected_behavior: str = ""   # Absent on the handwritten bootstrap policy, by design
+    trigger: str = ""
+    constraint: str = ""
+    verification: str = ""
     status: PolicyStatus = "active"

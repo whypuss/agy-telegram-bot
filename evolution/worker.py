@@ -24,11 +24,29 @@ def set_bot_instance(bot: Any) -> None:
     global _bot_instance
     _bot_instance = bot
 
+def evaluator_available() -> bool:
+    """Is there an auxiliary model the reviewer can actually call?"""
+    from evolution.evaluator import SENSENOVA_API_KEY, OPENROUTER_API_KEY
+    return bool(SENSENOVA_API_KEY or OPENROUTER_API_KEY)
+
+
 async def start_evolution_worker() -> None:
     """Main non-blocking async worker loop."""
     global _worker_running
     if _worker_running:
         return
+
+    # Without an auxiliary key evaluate_trajectory() returns [] every time, so
+    # the loop would poll SQLite every 3s forever to do nothing. Queued jobs are
+    # durable — they stay pending and are picked up once a key is configured.
+    if not evaluator_available():
+        logger.warning(
+            "⏸️ Evolution Worker not started: neither SENSENOVA_API_KEY nor "
+            "OPENROUTER_API_KEY is set. Review jobs will queue durably and be "
+            "processed once a key is configured. Bot功能不受影響。"
+        )
+        return
+
     _worker_running = True
     logger.info("🚀 Background Evolution Worker started")
 

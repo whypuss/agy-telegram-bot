@@ -314,7 +314,17 @@ def build_memory_context() -> str:
         raw_policies = get_active_policies()
         for p in raw_policies:
             pin_mark = "[PINNED] " if p.get("pinned") else ""
-            active_policies.append(f"{pin_mark}{p['summary']} (理由: {p.get('root_cause', '安全邊界')})")
+            line = f"{pin_mark}{p['summary']} (理由: {p.get('root_cause', '安全邊界')})"
+            # Structured fields are optional. A policy without them — including
+            # the handwritten bootstrap one — renders exactly as it always did.
+            detail = [
+                f"    ‣ {label}: {p[key]}"
+                for key, label in (("trigger", "觸發"), ("constraint", "約束"), ("verification", "驗證"))
+                if p.get(key)
+            ]
+            if detail:
+                line = "\n".join([line] + detail)
+            active_policies.append(line)
             touch_policy(p["id"])
     except Exception:
         pass
