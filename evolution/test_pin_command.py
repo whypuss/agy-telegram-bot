@@ -90,11 +90,13 @@ def main():
         d2 = json.loads(active.read_text())
         check("already pinned -> no-op, zero writes", ok and "已經係 pinned" in msg and d2 == d)
 
-        print("=== Lifecycle interaction ===")
+        print("=== Lifecycle is disabled ===")
+        check("automatic ageing is off", lifecycle.POLICY_AUTO_LIFECYCLE_ENABLED is False)
         stats = lifecycle.run_lifecycle_pass()
         d3 = json.loads(active.read_text())
-        check("pinned policy exempt from staleness",
-              stats["skipped_pinned"] >= 1 and d3["status"] == "active")
+        check("lifecycle pass is a reported no-op",
+              stats.get("disabled") == 1 and stats["stale"] == 0 and stats["archived"] == 0)
+        check("a 45-day-idle policy is left alone", d3["status"] == "active")
 
         ok, msg = gate.set_policy_pinned("rule_active", False, actor=ACTOR)
         d4 = json.loads(active.read_text())
@@ -107,8 +109,8 @@ def main():
 
         stats2 = lifecycle.run_lifecycle_pass()
         d5 = json.loads(active.read_text())
-        check("after unpin, lifecycle applies again",
-              stats2["skipped_pinned"] == 0 and d5["status"] == "stale")
+        check("unpinned policy is also left alone while ageing is off",
+              stats2.get("disabled") == 1 and d5["status"] == "active")
 
         print("=== Command surface removed ===")
         import bot as botmod

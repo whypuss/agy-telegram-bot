@@ -8,7 +8,9 @@ import time
 CandidateType = Literal["user_profile", "system_facts", "policy_proposal", "skill_patch"]
 ScopeType = Literal["permanent", "temporary", "session_only"]
 ProposalStatus = Literal["pending_approval", "approved", "rejected", "expired"]
-PolicyStatus = Literal["active", "stale", "archived"]
+# `stale` / `archived` are legacy values produced by the automatic lifecycle,
+# which is now disabled. Live policies are managed by hand: active or disabled.
+PolicyStatus = Literal["active", "disabled", "stale", "archived"]
 
 @dataclass
 class EvolutionCandidate:
@@ -54,11 +56,16 @@ class VersionedPolicy:
     summary: str
     root_cause: str
     evidence: str
+    # Reserved for a future policy relevance lifecycle. Neither field changes
+    # behaviour today: automatic ageing is disabled, so `pinned` exempts a policy
+    # from a pass that no longer runs. Context injection must never write
+    # `last_used_at` — injection != matched != affected_output. See
+    # evolution/lifecycle.POLICY_AUTO_LIFECYCLE_ENABLED.
     pinned: bool
+    last_used_at: int
     version: int
     created_at: int
     last_updated: int
-    last_used_at: int
     affected_behavior: str = ""   # Absent on the handwritten bootstrap policy, by design
     trigger: str = ""
     constraint: str = ""

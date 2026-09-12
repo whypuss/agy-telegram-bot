@@ -310,7 +310,7 @@ def build_memory_context() -> str:
     # Load active & pinned policies from evolution engine
     active_policies = []
     try:
-        from evolution.lifecycle import get_active_policies, touch_policy
+        from evolution.lifecycle import get_active_policies, mark_policy_injected
         raw_policies = get_active_policies()
         for p in raw_policies:
             pin_mark = "[PINNED] " if p.get("pinned") else ""
@@ -325,9 +325,17 @@ def build_memory_context() -> str:
             if detail:
                 line = "\n".join([line] + detail)
             active_policies.append(line)
-            touch_policy(p["id"])
-    except Exception:
-        pass
+            # Observational only. Injection is not usage: we know the rule was
+            # placed in context, not that it matched the task or changed the
+            # output. Feeding this into an idle timer is what made staleness
+            # unreachable and left pinning with nothing to protect.
+            mark_policy_injected(p["id"])
+    except Exception as e:
+        # One exception here used to drop every hardline policy out of the
+        # prompt without a trace — the agent would simply stop being
+        # constrained, and nothing would say so. Degrading quietly is the one
+        # behaviour this subsystem must not have.
+        logger.error("HARDLINE POLICIES NOT INJECTED — %s: %s", type(e).__name__, e)
 
     if not user_entries and not memory_entries and not session_entries and not active_policies:
         return ""

@@ -151,8 +151,50 @@ def run_structured_fields() -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def run_injection_is_not_usage() -> bool:
+    """Injecting a policy must not count as using it."""
+    print("=== Injection != usage ===")
+    ok = True
+    tmp = Path(tempfile.mkdtemp())
+    from evolution import lifecycle
+    import memory_manager
+    orig = lifecycle.POLICIES_DIR
+    lifecycle.POLICIES_DIR = tmp / "policies"
+    lifecycle.POLICIES_DIR.mkdir(parents=True)
+    try:
+        stamp = 1_000_000
+        (lifecycle.POLICIES_DIR / "rule_x.json").write_text(json.dumps({
+            "id": "rule_x", "summary": "Check before restart.", "root_cause": "r",
+            "evidence": "e", "pinned": False, "version": 1, "created_at": stamp,
+            "last_updated": stamp, "last_used_at": stamp, "status": "active"}), encoding="utf-8")
+
+        out = memory_manager.build_memory_context()
+        d = json.loads((lifecycle.POLICIES_DIR / "rule_x.json").read_text())
+
+        good = "Check before restart." in out
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  policy is still injected into context")
+
+        good = d["last_used_at"] == stamp
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  injection does NOT advance last_used_at")
+
+        good = d.get("last_injected_at", 0) > stamp
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  injection is recorded separately as last_injected_at")
+
+        good = lifecycle.POLICY_AUTO_LIFECYCLE_ENABLED is False
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  automatic ageing stays disabled")
+        return ok
+    finally:
+        lifecycle.POLICIES_DIR = orig
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     a, b = run_matrix(), run_structural()
     b = b and run_structured_fields()
+    b = b and run_injection_is_not_usage()
     print("\n" + ("ALL PASS" if a and b else "FAILURES PRESENT"))
     raise SystemExit(0 if a and b else 1)

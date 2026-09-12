@@ -21,6 +21,20 @@ ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 STALE_DAYS = 30
 ARCHIVE_DAYS = 90
 
+# Automatic ageing is off.
+#
+# The only signal the system has is that a policy was injected into context —
+# not that it matched the task, and not that it changed the output:
+#
+#     injected  !=  matched  !=  affected_output
+#
+# Treating injection as usage made `last_used_at` refresh on every conversation,
+# so staleness could never fire and `pinned` protected nothing. Rather than keep
+# a lifecycle that reports work it is not doing, it stays disabled until there is
+# a real relevance signal to age on. Policies are managed by hand meanwhile:
+# active / disabled, and deletion is a person removing the file.
+POLICY_AUTO_LIFECYCLE_ENABLED = False
+
 def get_active_policies() -> List[Dict[str, Any]]:
     """Retrieve all currently active and pinned policies for runtime injection."""
     if not POLICIES_DIR.exists():
@@ -32,17 +46,27 @@ def get_active_policies() -> List[Dict[str, Any]]:
             d = json.loads(f.read_text(encoding="utf-8"))
             if d.get("status") == "active":
                 active.append(d)
-        except Exception:
-            pass
+        except Exception as e:
+            # An unreadable policy file means that rule silently stops being
+            # enforced. Skipping it is the right recovery; doing so quietly is
+            # not — this is the failure the whole subsystem exists to prevent.
+            logger.error("POLICY NOT LOADED, rule is not in effect: %s — %s: %s",
+                         f.name, type(e).__name__, e)
     return active
 
-def touch_policy(policy_id: str) -> None:
-    """Mark a policy as recently active when loaded into context."""
+def mark_policy_injected(policy_id: str) -> None:
+    """Record that a policy was placed into a prompt. Observational only.
+
+    Deliberately writes `last_injected_at`, never `last_used_at`: being loaded
+    into context is not evidence the rule was relevant. Nothing reads this for
+    lifecycle decisions — it exists so that, if a usage signal is designed
+    later, there is a baseline to compare against.
+    """
     p_path = POLICIES_DIR / f"{policy_id}.json"
     if p_path.exists():
         try:
             d = json.loads(p_path.read_text(encoding="utf-8"))
-            d["last_used_at"] = int(time.time())
+            d["last_injected_at"] = int(time.time())
             p_path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -53,8 +77,12 @@ def run_lifecycle_pass() -> Dict[str, int]:
     Moves idle policies through: active -> stale -> archived.
     Pinned policies are 100% exempt.
     """
-    stats = {"stale": 0, "archived": 0, "skipped_pinned": 0}
+    stats = {"stale": 0, "archived": 0, "skipped_pinned": 0, "disabled": 0}
     now = int(time.time())
+
+    if not POLICY_AUTO_LIFECYCLE_ENABLED:
+        stats["disabled"] = 1
+        return stats
 
     for f in POLICIES_DIR.glob("*.json"):
         try:
