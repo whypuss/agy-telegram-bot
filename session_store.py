@@ -40,6 +40,9 @@ user_last_turn_usage: Dict[int, dict] = {}
 # User ID -> Lifetime Usage dict (total across all sessions since bot startup)
 user_lifetime_usage: Dict[int, dict] = {}
 
+# User ID -> agy cumulative raw usage baseline for Delta calculations
+user_agy_cumulative: Dict[int, dict] = {}
+
 # User ID -> Rolling cross-backend transcript. Each entry:
 # {"role": "user"|"assistant", "backend": "agy"|"opencode", "text": str}
 # Used to hand off recent context when the user switches backends
@@ -55,7 +58,7 @@ _BACKEND_LABELS = {"agy": "Antigravity", "opencode": "本地 OpenCode"}
 def load_state() -> None:
     """Load session state from disk on startup."""
     global user_conversations, user_models, user_session_usage, user_last_turn_usage, user_lifetime_usage
-    global user_oc_sessions, user_oc_models, user_transcripts
+    global user_oc_sessions, user_oc_models, user_transcripts, user_agy_cumulative
     with _state_lock:
         if not STATE_FILE.exists():
             logger.info("No existing state file found at %s. Initializing fresh state.", STATE_FILE)
@@ -65,29 +68,34 @@ def load_state() -> None:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            if not isinstance(data, dict):
-                return
-
             def _int_dict(d: dict) -> dict:
                 res = {}
                 for k, v in d.items():
                     try:
                         res[int(k)] = v
                     except (ValueError, TypeError):
-                        # Dropping a key loses that user's conversation or model
-                        # binding — they silently start a fresh session.
-                        logger.error("Discarding unreadable state key %r; the binding it "
+                        logger.error("Corrupt user ID '%s' in state file; whatever state that key "
                                      "held is lost", k)
                 return res
 
-            user_conversations = _int_dict(data.get("conversations", {}))
-            user_models = _int_dict(data.get("models", {}))
-            user_oc_sessions = _int_dict(data.get("oc_sessions", {}))
-            user_oc_models = _int_dict(data.get("oc_models", {}))
-            user_session_usage = _int_dict(data.get("session_usage", {}))
-            user_last_turn_usage = _int_dict(data.get("last_turn_usage", {}))
-            user_lifetime_usage = _int_dict(data.get("lifetime_usage", {}))
-            user_transcripts = _int_dict(data.get("transcripts", {}))
+            user_conversations.clear()
+            user_conversations.update(_int_dict(data.get("conversations", {})))
+            user_models.clear()
+            user_models.update(_int_dict(data.get("models", {})))
+            user_oc_sessions.clear()
+            user_oc_sessions.update(_int_dict(data.get("oc_sessions", {})))
+            user_oc_models.clear()
+            user_oc_models.update(_int_dict(data.get("oc_models", {})))
+            user_session_usage.clear()
+            user_session_usage.update(_int_dict(data.get("session_usage", {})))
+            user_last_turn_usage.clear()
+            user_last_turn_usage.update(_int_dict(data.get("last_turn_usage", {})))
+            user_lifetime_usage.clear()
+            user_lifetime_usage.update(_int_dict(data.get("lifetime_usage", {})))
+            user_transcripts.clear()
+            user_transcripts.update(_int_dict(data.get("transcripts", {})))
+            user_agy_cumulative.clear()
+            user_agy_cumulative.update(_int_dict(data.get("agy_cumulative", {})))
 
             logger.info(
                 "Successfully loaded state from %s: %d conversations, %d models",
@@ -111,6 +119,7 @@ def save_state() -> None:
             "last_turn_usage": {str(k): v for k, v in user_last_turn_usage.items()},
             "lifetime_usage": {str(k): v for k, v in user_lifetime_usage.items()},
             "transcripts": {str(k): v for k, v in user_transcripts.items()},
+            "agy_cumulative": {str(k): v for k, v in user_agy_cumulative.items()},
         }
 
         try:
@@ -225,6 +234,13 @@ def reset_user_conversation(user_id: int) -> None:
     user_conversations.pop(user_id, None)
     user_session_usage.pop(user_id, None)
     user_last_turn_usage.pop(user_id, None)
+    user_agy_cumulative.pop(user_id, None)
+    save_state()
+
+
+def clear_agy_cumulative(user_id: int) -> None:
+    """Clear the agy cumulative usage baseline for a user."""
+    user_agy_cumulative.pop(user_id, None)
     save_state()
 
 

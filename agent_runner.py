@@ -40,6 +40,8 @@ from session_store import (
     user_session_usage,
     user_last_turn_usage,
     user_lifetime_usage,
+    user_agy_cumulative,
+    clear_agy_cumulative,
     get_user_model,
     set_user_model,
     get_user_conversation,
@@ -64,8 +66,8 @@ _active_processes: Dict[int, asyncio.subprocess.Process] = {}
 _cancelled_users: set = set()
 
 # User ID -> Last known agy cumulative usage (agy-only baseline for turn deltas,
-# so interleaved OpenCode fallback turns never corrupt agy delta math)
-_agy_last_cumulative: Dict[int, dict] = {}
+# backed by session_store.user_agy_cumulative)
+_agy_last_cumulative = user_agy_cumulative
 
 # User ID -> Backend that served the last turn ("agy" | "opencode" | "agy+fallback")
 _last_backend: Dict[int, str] = {}
@@ -515,7 +517,7 @@ async def _run_agy_turn(
         # Compute delta for this single turn against the agy-only baseline.
         # (Session totals are updated additively so interleaved OpenCode
         # fallback turns never corrupt agy delta math.)
-        baseline = _agy_last_cumulative.get(user_id)
+        baseline = user_agy_cumulative.get(user_id)
         if baseline is None:
             sess = user_session_usage.get(user_id, {})
             if sess.get("total_tokens"):
@@ -527,11 +529,21 @@ async def _run_agy_turn(
         prev_output = baseline.get("output_tokens", 0)
         prev_thinking = baseline.get("thinking_tokens", 0)
 
+        # Self-healing / Session-reset detection:
+        # If agy reports fewer cumulative total tokens than our baseline, the
+        # session was reset or re-initialized underneath. Discard the stale baseline
+        # so we never compute negative delta and clamp turn tokens to 0.
+        if total_tokens < prev_total:
+            prev_total = 0
+            prev_input = 0
+            prev_output = 0
+            prev_thinking = 0
+
         turn_input = max(0, input_tokens - prev_input) if prev_total > 0 else input_tokens
         turn_output = max(0, output_tokens - prev_output) if prev_total > 0 else output_tokens
         turn_thinking = max(0, thinking_tokens - prev_thinking) if prev_total > 0 else thinking_tokens
         turn_total = max(0, total_tokens - prev_total) if prev_total > 0 else total_tokens
-        _agy_last_cumulative[user_id] = {
+        user_agy_cumulative[user_id] = {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "thinking_tokens": thinking_tokens,
@@ -719,7 +731,10 @@ async def compact_user_conversation(
     oc_model_arg = get_user_model(user_id) if oc_mode else None
 
     old_session = user_session_usage.get(user_id, {})
-    old_tokens = old_session.get("total_tokens", 0)
+    old_tokens = max(
+        old_session.get("total_tokens", 0),
+        user_agy_cumulative.get(user_id, {}).get("total_tokens", 0),
+    )
 
     source_label = "本地 OpenCode" if source == "opencode" else "Antigravity"
     if on_progress:
@@ -779,10 +794,19 @@ async def compact_user_conversation(
     if not summary_reply or summary_reply.startswith("❌"):
         return False, f"提煉對話記憶失敗：\n{summary_reply}", old_tokens, 0
 
-    # 2. Reset BOTH backends' sessions — all memory now migrates into the
-    # freshly seeded session on the current backend.
+    # Capture peak usage after summary turn completes
+    current_session = user_session_usage.get(user_id, {})
+    old_tokens = max(
+        old_tokens,
+        current_session.get("total_tokens", 0),
+        user_agy_cumulative.get(user_id, {}).get("total_tokens", 0),
+    )
+
+    # 2. Reset BOTH backends' sessions and cumulative baseline — all memory
+    # now migrates into the freshly seeded session on the current backend.
     reset_user_conversation(user_id)
     reset_user_oc_session(user_id)
+    clear_agy_cumulative(user_id)
 
     if on_progress:
         await on_progress("🔄 正在注入壓縮記憶至全新會話...")
@@ -803,6 +827,8 @@ async def compact_user_conversation(
 
     new_session = user_session_usage.get(user_id, {})
     new_tokens = new_session.get("total_tokens", 0)
+    if new_tokens == 0 and new_turn_usage:
+        new_tokens = new_turn_usage.get("total_tokens", 0)
 
     # The seeded session is now the single source of truth; drop the rolling
     # transcript so no stale handoff context gets injected later.
