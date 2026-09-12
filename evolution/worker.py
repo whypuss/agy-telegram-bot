@@ -13,7 +13,6 @@ from typing import Optional, Any
 from evolution.queue import pop_pending_job, mark_job_status
 from evolution.evaluator import evaluate_trajectory
 from evolution.gate import dispatch_candidate
-from evolution.lifecycle import run_lifecycle_pass
 
 logger = logging.getLogger("agy-tg-bot.evolution.worker")
 
@@ -50,8 +49,6 @@ async def start_evolution_worker() -> None:
     _worker_running = True
     logger.info("🚀 Background Evolution Worker started")
 
-    last_lifecycle_check = 0
-
     while _worker_running:
         try:
             # 1. Process pending jobs from SQLite queue
@@ -71,13 +68,6 @@ async def start_evolution_worker() -> None:
                     logger.warning("❌ [Worker] Error processing job %s: %s", job_id, je)
                     mark_job_status(job_id, "failed", inc_retry=True)
 
-            # 2. Hourly deterministic lifecycle check
-            now = int(time.time())
-            if now - last_lifecycle_check > 3600:
-                last_lifecycle_check = now
-                stats = run_lifecycle_pass()
-                if stats["stale"] or stats["archived"]:
-                    logger.info("📦 [Lifecycle] Pass summary: %s", stats)
 
         except Exception as e:
             logger.error("Error in evolution worker loop: %s", e)

@@ -165,26 +165,25 @@ python bot.py
 
 ## 🧬 自我進化：證據門檻與 Policy 管理
 
-### Policy 由人管理，沒有自動老化
+### 沒有自動老化，也沒有 pin
 
-`POLICY_AUTO_LIFECYCLE_ENABLED = False`。系統唯一擁有的訊號是「規則曾被注入 prompt」，而這並不代表它與任務相關，更不代表它影響了輸出：
+系統唯一擁有的訊號是「規則曾被注入 prompt」，而這並不代表它與任務相關，更不代表它影響了輸出：
 
 ```
 injected  !=  matched  !=  affected_output
 ```
 
-以注入當成使用，會讓閒置計時器永遠歸零，自動老化因而永遠不會觸發。與其保留一個回報著自己並未執行之工作的 lifecycle，不如關掉它，直到出現真正的相關性訊號為止。
+以注入當成使用，會讓閒置計時器永遠歸零，自動老化因而永遠不會觸發。stale / archive 機制，以及唯一作用是豁免該機制的 `pinned` 欄位，**已整套移除**而非停用 —— 一個仍然保留 API、目錄與狀態值的功能並沒有被關掉，只是安靜了。
 
-- Policy 狀態由人管理：`active` / `disabled`，刪除就是移除檔案。
-- 注入只寫 `last_injected_at`，純屬觀察用途，不參與任何決策。
-- `pinned` 與 `last_used_at` 保留在 schema 中但**目前不影響行為**，作為日後設計真實訊號時的落點。
-- **Evidence gate 永不自動 pin。** 通過門檻的 candidate 得到 `active`；`evaluator` 是 LLM，可能產出 `pinned: true`，該欄位在 dispatch 時被硬性清除，只留一行 log。
+- Policy 狀態由人管理：`status: active` 會被注入，其餘不會；刪除規則就是移除檔案。
+- `evolution.lifecycle.set_policy_status(rule_id, "active" | "disabled")` 是唯一的開關。
+- 注入只寫 `last_injected_at`，純屬觀察用途，沒有任何程式碼讀它做決策。
 
 ### Policy 身分與修訂
 
-Policy 檔名由 candidate 的 `rule_id` 決定（`rule_<slug>.json`），而非提案 ID。因此修訂同一條規則會**更新原檔**：`version` 遞增、`created_at` 承接、人手授予的 `pinned` 保留、注入的仍然只有一條。
+Policy 檔名由 candidate 的 `rule_id` 決定（`rule_<slug>.json`），而非提案 ID。因此修訂同一條規則會**更新原檔**：`version` 遞增、`created_at` 承接、注入的仍然只有一條。
 
-若既有 policy 檔案無法解析，批准會**中止**而不是覆寫 —— 覆寫會將 `version` 重設為 1、`created_at` 重設為現在，並丟失 pin。提案維持 `pending_approval`，修復檔案後可重試。
+若既有 policy 檔案無法解析，批准會**中止**而不是覆寫 —— 覆寫會將 `version` 重設為 1、`created_at` 重設為現在。提案維持 `pending_approval`，修復檔案後可重試。
 
 無法解析的提案會在 `/proposals` 中列出檔名。將它們靜默排除，會讓 Bot 在磁碟上確實躺著一個無法批准的提案時，回報「目前沒有待審批的自我進化提案」——那是錯誤的陳述，而不只是缺漏。
 
@@ -210,7 +209,6 @@ Policy 檔名由 candidate 的 `rule_id` 決定（`rule_<slug>.json`），而非
 
 ```bash
 venv/bin/python3 -m evolution.test_evidence_gate    # 證據矩陣、policy 身分與修訂、注入 != 使用
-venv/bin/python3 -m evolution.test_pin_command      # set_policy_pinned() 的守衛與冪等性
 venv/bin/python3 -m evolution.test_command_menu     # 指令選單與 handler 一致性
 venv/bin/python3 -m evolution.test_stream_limit     # NDJSON 串流上限、watchdog 重啟契約
 ```

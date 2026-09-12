@@ -7,7 +7,7 @@ from evolution.schema import EvolutionCandidate, Proposal, VersionedPolicy
 from evolution.queue import enqueue_turn, init_queue
 from evolution.gate import (
     approve_proposal, reject_proposal, list_pending_proposals,
-    list_unreadable_proposals, get_proposal, set_policy_pinned,
+    list_unreadable_proposals, get_proposal,
 )
 from evolution.worker import start_evolution_worker, set_bot_instance
 
@@ -22,7 +22,6 @@ __all__ = [
     "list_pending_proposals",
     "list_unreadable_proposals",
     "get_proposal",
-    "set_policy_pinned",
     "start_evolution_worker",
     "set_bot_instance"
 ]

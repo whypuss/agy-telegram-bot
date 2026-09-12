@@ -34,7 +34,7 @@ def run_matrix() -> bool:
 
 
 def run_structural() -> bool:
-    """Rejected candidates must not reach disk; accepted ones must be schema-valid and unpinned."""
+    """Rejected candidates must not reach disk; accepted ones must be schema-valid."""
     print("=== Structural ===")
     ok = True
     tmp = Path(tempfile.mkdtemp())
@@ -43,12 +43,12 @@ def run_structural() -> bool:
     gate.PROPOSALS_DIR.mkdir(parents=True)
     gate.POLICIES_DIR.mkdir(parents=True)
     try:
-        def cand(ev, behavior, pinned=False):
+        def cand(ev, behavior):
             return EvolutionCandidate(
                 candidate_type="policy_proposal", scope="permanent",
                 rule_id="test-rule", summary="Verify the gateway restart path before reporting success.",
                 root_cause="Reported done on edit success.", confidence=0.95,
-                evidence=ev, affected_behavior=behavior, pinned=pinned,
+                evidence=ev, affected_behavior=behavior,
             )
 
         rejected = asyncio.run(gate.dispatch_candidate(cand("exit code 0", BEHAVIOR)))
@@ -57,17 +57,16 @@ def run_structural() -> bool:
         ok &= good
         print(f"  {'PASS' if good else 'FAIL'}  rejected candidate writes nothing ({len(wrote)} files)")
 
-        # An accepted candidate that ASKS to be pinned must still come out unpinned.
-        pid = asyncio.run(gate.dispatch_candidate(cand(MATRIX[-1][1], BEHAVIOR, pinned=True)))
+        pid = asyncio.run(gate.dispatch_candidate(cand(MATRIX[-1][1], BEHAVIOR)))
         good = pid is not None
         ok &= good
         print(f"  {'PASS' if good else 'FAIL'}  accepted candidate creates proposal")
 
         if pid:
             prop = json.loads((gate.PROPOSALS_DIR / f"{pid}.json").read_text())
-            good = prop["pinned"] is False
+            good = "pinned" not in prop
             ok &= good
-            print(f"  {'PASS' if good else 'FAIL'}  evaluator-requested pinning stripped (pinned={prop['pinned']})")
+            print(f"  {'PASS' if good else 'FAIL'}  proposal carries no pinned field")
 
             succeeded, msg = gate.approve_proposal(pid, approved_by=1)
             pols = list(gate.POLICIES_DIR.glob("*.json"))
@@ -77,15 +76,15 @@ def run_structural() -> bool:
 
             if pols:
                 p = json.loads(pols[0].read_text())
-                required = {"id", "summary", "root_cause", "evidence", "pinned",
-                            "version", "created_at", "last_updated", "last_used_at", "status"}
+                required = {"id", "summary", "root_cause", "evidence",
+                            "version", "created_at", "last_updated", "status"}
                 good = required <= set(p)
                 ok &= good
                 print(f"  {'PASS' if good else 'FAIL'}  policy matches VersionedPolicy schema")
 
-                good = p["pinned"] is False and p["status"] == "active"
+                good = p["status"] == "active" and "pinned" not in p
                 ok &= good
-                print(f"  {'PASS' if good else 'FAIL'}  compiled policy is active, NOT pinned")
+                print(f"  {'PASS' if good else 'FAIL'}  compiled policy is active and carries no pin field")
 
                 good = p["evidence"] == MATRIX[-1][1]
                 ok &= good
@@ -118,8 +117,8 @@ def run_structured_fields() -> bool:
     lifecycle.POLICIES_DIR.mkdir(parents=True)
     try:
         base = {"id": "rule_x", "summary": "Check before restart.", "root_cause": "Blind restart.",
-                "evidence": "systemctl status -> inactive", "pinned": False, "version": 1,
-                "created_at": 1, "last_updated": 1, "last_used_at": 1, "status": "active"}
+                "evidence": "systemctl status -> inactive", "version": 1,
+                "created_at": 1, "last_updated": 1, "status": "active"}
 
         # Without the optional fields — must render as a bare single line.
         (lifecycle.POLICIES_DIR / "rule_x.json").write_text(json.dumps(base), encoding="utf-8")
@@ -165,7 +164,7 @@ def run_injection_is_not_usage() -> bool:
         stamp = 1_000_000
         (lifecycle.POLICIES_DIR / "rule_x.json").write_text(json.dumps({
             "id": "rule_x", "summary": "Check before restart.", "root_cause": "r",
-            "evidence": "e", "pinned": False, "version": 1, "created_at": stamp,
+            "evidence": "e", "version": 1, "created_at": stamp,
             "last_updated": stamp, "last_used_at": stamp, "status": "active"}), encoding="utf-8")
 
         out = memory_manager.build_memory_context()
@@ -183,9 +182,13 @@ def run_injection_is_not_usage() -> bool:
         ok &= good
         print(f"  {'PASS' if good else 'FAIL'}  injection is recorded separately as last_injected_at")
 
-        good = lifecycle.POLICY_AUTO_LIFECYCLE_ENABLED is False
+        good = not hasattr(lifecycle, "run_lifecycle_pass")
         ok &= good
-        print(f"  {'PASS' if good else 'FAIL'}  automatic ageing stays disabled")
+        print(f"  {'PASS' if good else 'FAIL'}  automatic lifecycle is gone, not merely disabled")
+
+        good = "[PINNED]" not in out
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  no pin marker is rendered for a property that no longer exists")
         return ok
     finally:
         lifecycle.POLICIES_DIR = orig
@@ -214,7 +217,6 @@ def run_policy_identity() -> bool:
         p1 = asyncio.run(gate.dispatch_candidate(cand("Audit before restarting production.")))
         gate.approve_proposal(p1, approved_by=1)
         first = json.loads((gate.POLICIES_DIR / "rule_prod-guard.json").read_text())
-        gate.set_policy_pinned("rule_prod-guard", True, actor=1)
 
         p2 = asyncio.run(gate.dispatch_candidate(cand("Audit AND back up before restarting.")))
         gate.approve_proposal(p2, approved_by=1)
@@ -229,15 +231,15 @@ def run_policy_identity() -> bool:
         good = d["created_at"] == first["created_at"]
         ok &= good
         print(f"  {'PASS' if good else 'FAIL'}  created_at is carried forward")
-        good = d["pinned"] is True
+        good = "pinned" not in d
         ok &= good
-        print(f"  {'PASS' if good else 'FAIL'}  a human's pin survives a revision")
+        print(f"  {'PASS' if good else 'FAIL'}  compiled policy carries no pinned field")
         good = len(lifecycle.get_active_policies()) == 1
         ok &= good
         print(f"  {'PASS' if good else 'FAIL'}  only one policy is injected")
 
         # A corrupt existing policy must abort the approval, not be overwritten.
-        corrupt = '{"id":"rule_x","version":7,"pinned":true TRUNCATED'
+        corrupt = '{"id":"rule_x","version":7 TRUNCATED'
         (gate.POLICIES_DIR / "rule_abort-me.json").write_text(corrupt)
         c = cand("Audit before restarting production.")
         c.rule_id = "abort-me"
@@ -261,10 +263,54 @@ def run_policy_identity() -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def run_manual_policy_control() -> bool:
+    """status is the only lifecycle: disabling a policy stops it being injected."""
+    print("=== Manual policy control ===")
+    ok = True
+    tmp = Path(tempfile.mkdtemp())
+    from evolution import lifecycle
+    orig = lifecycle.POLICIES_DIR
+    lifecycle.POLICIES_DIR = tmp / "pol"
+    lifecycle.POLICIES_DIR.mkdir(parents=True)
+    try:
+        (lifecycle.POLICIES_DIR / "rule_x.json").write_text(json.dumps({
+            "id": "rule_x", "summary": "Check first.", "root_cause": "r", "evidence": "e",
+            "version": 1, "created_at": 1, "last_updated": 1, "status": "active"}), encoding="utf-8")
+
+        good = len(lifecycle.get_active_policies()) == 1
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  active policy is injected")
+
+        succeeded, _ = lifecycle.set_policy_status("rule_x", "disabled")
+        good = succeeded and len(lifecycle.get_active_policies()) == 0
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  disabling stops injection")
+
+        succeeded, msg = lifecycle.set_policy_status("rule_x", "disabled")
+        good = succeeded and "已經係" in msg
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  repeat is a no-op")
+
+        succeeded, _ = lifecycle.set_policy_status("rule_x", "bogus")
+        good = not succeeded
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  invalid status rejected")
+
+        d = json.loads((lifecycle.POLICIES_DIR / "rule_x.json").read_text())
+        good = d["summary"] == "Check first." and d["version"] == 1 and d["created_at"] == 1
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  status change touches nothing else")
+        return ok
+    finally:
+        lifecycle.POLICIES_DIR = orig
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     a, b = run_matrix(), run_structural()
     b = b and run_structured_fields()
     b = b and run_injection_is_not_usage()
     b = b and run_policy_identity()
+    b = b and run_manual_policy_control()
     print("\n" + ("ALL PASS" if a and b else "FAILURES PRESENT"))
     raise SystemExit(0 if a and b else 1)

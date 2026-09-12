@@ -8,9 +8,9 @@ import time
 CandidateType = Literal["user_profile", "system_facts", "policy_proposal", "skill_patch"]
 ScopeType = Literal["permanent", "temporary", "session_only"]
 ProposalStatus = Literal["pending_approval", "approved", "rejected", "expired"]
-# `stale` / `archived` are legacy values produced by the automatic lifecycle,
-# which is now disabled. Live policies are managed by hand: active or disabled.
-PolicyStatus = Literal["active", "disabled", "stale", "archived"]
+# The only lifecycle there is: a policy is injected or it is not. Managed by
+# hand — there is no automatic ageing. See evolution/lifecycle.py.
+PolicyStatus = Literal["active", "disabled"]
 
 @dataclass
 class EvolutionCandidate:
@@ -27,7 +27,6 @@ class EvolutionCandidate:
     trigger: Optional[str] = None         # When the rule applies
     constraint: Optional[str] = None      # What is forbidden or required
     verification: Optional[str] = None    # How to prove compliance
-    pinned: bool = False                  # Security hardline, immune to archival. Never set by the pipeline.
     skill_class: Optional[str] = None     # Target class-level skill (e.g. server-operations)
     requires_approval: bool = False       # Policy and Skill always require approval
 
@@ -38,7 +37,6 @@ class Proposal:
     summary: str
     root_cause: str
     evidence: str
-    pinned: bool
     skill_class: Optional[str]
     confidence: float
     created_at: int
@@ -60,13 +58,6 @@ class VersionedPolicy:
     summary: str
     root_cause: str
     evidence: str
-    # Reserved for a future policy relevance lifecycle. Neither field changes
-    # behaviour today: automatic ageing is disabled, so `pinned` exempts a policy
-    # from a pass that no longer runs. Context injection must never write
-    # `last_used_at` — injection != matched != affected_output. See
-    # evolution/lifecycle.POLICY_AUTO_LIFECYCLE_ENABLED.
-    pinned: bool
-    last_used_at: int
     version: int
     created_at: int
     last_updated: int

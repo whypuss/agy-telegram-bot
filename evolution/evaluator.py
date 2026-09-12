@@ -67,7 +67,6 @@ _EVALUATOR_PROMPT = """\
       "verification": "如何自我驗證已遵守（選填）",
       "evidence": "軌跡中實際出現過的原文片段：工具輸出、錯誤訊息、測試結果或用戶糾偏原話。不得自行撰寫。",
       "confidence": 0.95,
-      "pinned": true | false,
       "skill_class": "server-operations" | "network-device" | "bot-deployment" | null,
       "requires_approval": true | false
     }
@@ -135,7 +134,6 @@ async def evaluate_trajectory(trajectory: Dict[str, Any]) -> List[EvolutionCandi
                     trigger=(c.get("trigger") or "").strip(),
                     constraint=(c.get("constraint") or "").strip(),
                     verification=(c.get("verification") or "").strip(),
-                    pinned=bool(c.get("pinned", False)),
                     skill_class=c.get("skill_class"),
                     requires_approval=req_app
                 ))

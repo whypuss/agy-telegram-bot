@@ -35,6 +35,19 @@ _TEMPORARY_PATTERNS = [
 
 CONFIDENCE_THRESHOLD = 0.85
 
+
+def _policy_id_for(rule_name: str) -> str:
+    """Map a candidate's rule_id to its stable policy filename stem.
+
+    Identity comes from the rule, never from the proposal id: deriving it from
+    `p_<timestamp>_<name>` meant every approval landed on a fresh filename, so a
+    revision created a second policy beside the one it corrected and both stayed
+    in every prompt. Constrained charset, so Telegram text cannot escape
+    POLICIES_DIR.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (rule_name or "").strip()).strip("-._")[:64]
+    return f"rule_{slug or 'unnamed'}"
+
 def validate_candidate(cand: EvolutionCandidate) -> bool:
     """Deterministic validation without LLM hallucination risk."""
     if cand.scope != "permanent":
@@ -92,15 +105,6 @@ async def dispatch_candidate(
 
     # 2. High-risk entries: Policy proposal or Skill patch (HOLD for Telegram approval)
     #
-    # Pinning is never inherited from the candidate. The evaluator is a model and
-    # can ask for `pinned: true`; honouring that would let one misjudgement mint a
-    # standing rule the pipeline granted itself. Clearing the gate earns a
-    # candidate `active`, not `pinned` — set_policy_pinned() is the only writer,
-    # and a person is the only caller.
-    if cand.pinned:
-        logger.info("📌 [Gate] Ignoring evaluator-requested pinning for %s — "
-                    "pinning is a human action, not a pipeline outcome.", cand.rule_id)
-
     prop_id = f"p_{int(time.time())}_{cand.rule_id[:16]}"
     proposal = Proposal(
         id=prop_id,
@@ -113,7 +117,6 @@ async def dispatch_candidate(
         trigger=cand.trigger or "",
         constraint=cand.constraint or "",
         verification=cand.verification or "",
-        pinned=False,
         skill_class=cand.skill_class,
         confidence=cand.confidence,
         created_at=int(time.time()),
@@ -122,7 +125,7 @@ async def dispatch_candidate(
 
     prop_path = PROPOSALS_DIR / f"{prop_id}.json"
     prop_path.write_text(json.dumps(proposal.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("🛡️ [Gate -> Proposal] Created %s: %s (pinned=%s)", prop_id, cand.summary, cand.pinned)
+    logger.info("🛡️ [Gate -> Proposal] Created %s: %s", prop_id, cand.summary)
 
     # 3. Notify user via Telegram if bot and chat_id are available
     if bot and notify_chat_id:
@@ -140,7 +143,6 @@ async def dispatch_candidate(
                 text += f"• *受影響行為*: {cand.affected_behavior[:100]}\n"
             if cand.evidence:
                 text += f"• *驗證證據*: _{cand.evidence[:160]}_\n"
-            text += "• _批准後為 active,非 pinned_\n"
 
             text += f"\n請確認是否批准生效：\n/approve {prop_id} 或點擊下方按鈕"
 
@@ -207,7 +209,6 @@ def approve_proposal(proposal_id: str, approved_by: Optional[int] = None) -> Tup
         policy_path = POLICIES_DIR / f"{rule_id}.json"
         version = 1
         created_at = now
-        was_pinned = False
 
         # Read the superseded policy once. If it exists but cannot be read, stop:
         # compiling over it would reset version to 1, reset created_at to now, and
@@ -224,9 +225,6 @@ def approve_proposal(proposal_id: str, approved_by: Optional[int] = None) -> Tup
                                f"所以寧可失敗。請先修復或移除該檔案再重試。")
             version = old.get("version", 1) + 1
             created_at = old.get("created_at", now)
-            # A re-compiled policy keeps whatever pinning a human already granted
-            # it, but approval never adds it.
-            was_pinned = bool(old.get("pinned", False))
 
         policy = VersionedPolicy(
             id=rule_id,
@@ -237,11 +235,9 @@ def approve_proposal(proposal_id: str, approved_by: Optional[int] = None) -> Tup
             trigger=data.get("trigger", ""),
             constraint=data.get("constraint", ""),
             verification=data.get("verification", ""),
-            pinned=was_pinned,
             version=version,
             created_at=created_at,
             last_updated=now,
-            last_used_at=now,
             status="active"
         )
         policy_path.write_text(json.dumps(policy.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -286,86 +282,6 @@ def reject_proposal(proposal_id: str, rejected_by: Optional[int] = None) -> Tupl
     prop_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("❌ [Proposal Rejected] %s", proposal_id)
     return True, f"🚫 提案 `{proposal_id}` 已駁回。"
-
-# A rule id addresses one file inside POLICIES_DIR and nothing else. Telegram
-# text reaches this function, so the id is constrained rather than trusted.
-_RULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-
-# Fields pin/unpin is allowed to touch. Everything else — summary, root_cause,
-# evidence, version, created_at, provenance — is immutable to this operation.
-_PIN_MUTABLE = {"pinned", "pinned_by", "pinned_at", "last_updated"}
-
-
-def _policy_id_for(rule_name: str) -> str:
-    """Map a candidate's rule_id to its stable policy filename stem."""
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (rule_name or "").strip()).strip("-._")[:64]
-    return f"rule_{slug or 'unnamed'}"
-
-
-def set_policy_pinned(policy_id: str, pinned: bool, actor: Optional[int] = None) -> Tuple[bool, str]:
-    """Pin or unpin an existing active policy. Human action only.
-
-    The evidence gate deliberately never pins, so this is the sole path to a
-    staleness-immune rule — and it requires a person to take it. The caller
-    supplies only a verified identity, an exact rule id, and the target state;
-    every read, check and write happens here.
-    """
-    policy_id = (policy_id or "").strip()
-    if not _RULE_ID_RE.match(policy_id) or policy_id != Path(policy_id).name:
-        return False, f"❌ 無效 rule ID `{policy_id[:64]}` — 只接受精確 rule ID。"
-
-    policy_path = POLICIES_DIR / f"{policy_id}.json"
-    if not policy_path.exists():
-        return False, (f"❌ 找不到 policy `{policy_id}`\n"
-                       f"（proposal 或 candidate ID 唔可以直接 pin；用 `/proposals` 睇待審批項目。）")
-
-    try:
-        d = json.loads(policy_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        return False, f"❌ 讀取 policy 失敗: {e}"
-
-    status = d.get("status", "active")
-    if status != "active":
-        return False, (f"❌ `{policy_id}` 狀態係 `{status}`,唔係 `active` —— 只可以 pin active policy。\n"
-                       f"（archived policy 要先復原;呢個函數唔會順便 approve 或 compile。）")
-
-    was = bool(d.get("pinned", False))
-    target = bool(pinned)
-    version = d.get("version", 1)
-
-    if was == target:
-        return True, (f"ℹ️ `{policy_id}` {'已經係 pinned' if was else '本來就唔係 pinned'},未作改動。\n"
-                      f"• pinned: `{was}` → `{target}`（no-op）\n"
-                      f"• version: `{version}`（未 bump）\n"
-                      f"• path: `{policy_path}`")
-
-    before = {k: v for k, v in d.items() if k not in _PIN_MUTABLE}
-    now = int(time.time())
-    d["pinned"] = target
-    d["last_updated"] = now
-    if target:
-        d["pinned_by"] = actor
-        d["pinned_at"] = now
-    else:
-        d.pop("pinned_by", None)
-        d.pop("pinned_at", None)
-
-    after = {k: v for k, v in d.items() if k not in _PIN_MUTABLE}
-    if before != after:
-        return False, f"❌ 中止：pin 操作會改動 `{policy_id}` 嘅非 pin 欄位,已放棄寫入。"
-
-    policy_path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("📌 [Policy %s] %s by %s", "Pinned" if target else "Unpinned", policy_id, actor)
-
-    tail = ("已免疫 staleness cleanup。" if target
-            else "已恢復正常 lifecycle / staleness 管理。")
-    return True, (f"{'📌 已釘住' if target else '📍 已解除釘住'} `{policy_id}`\n"
-                  f"• pinned: `{was}` → `{target}`\n"
-                  f"• version: `{version}`（未 bump）\n"
-                  f"• status: `{status}`\n"
-                  f"• path: `{policy_path}`\n"
-                  f"{tail}")
-
 
 def list_unreadable_proposals() -> List[str]:
     """Filenames of proposals that cannot be parsed.

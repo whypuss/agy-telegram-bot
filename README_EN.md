@@ -168,37 +168,36 @@ python bot.py
 
 ## 🧬 Self-Evolution: Evidence Gate and Policy Management
 
-### Policies are managed by hand; nothing ages automatically
+### No automatic ageing, and no pinning
 
-`POLICY_AUTO_LIFECYCLE_ENABLED = False`. The only signal available is that a
-rule was injected into a prompt — which is not evidence it applied to the task,
-and not evidence it changed the output:
+The only signal available is that a rule was injected into a prompt — which is
+not evidence it applied to the task, and not evidence it changed the output:
 
 ```
 injected  !=  matched  !=  affected_output
 ```
 
 Treating injection as usage kept the idle timer permanently reset, so automatic
-ageing could never fire. Rather than keep a lifecycle that reports work it is
-not doing, it stays off until there is a real relevance signal.
+ageing could never fire. The stale/archive machinery, and the `pinned` flag whose
+sole effect was exempting a policy from it, have been **removed outright** rather
+than disabled: a feature that still ships its API, its directories and its status
+values is not switched off, merely quiet.
 
-- Policy state is human-managed: `active` / `disabled`; deletion is removing the file.
-- Injection writes only `last_injected_at`, purely observational, read by nothing.
-- `pinned` and `last_used_at` remain in the schema but **do not affect behaviour**,
-  reserved as a landing place for a future signal.
-- **The evidence gate never pins.** Clearing it earns `active`. The evaluator is
-  an LLM and may emit `pinned: true`; that field is stripped at dispatch.
+- Policy state is human-managed: `status: active` is injected, anything else is
+  not; deleting a rule means removing its file.
+- `evolution.lifecycle.set_policy_status(rule_id, "active" | "disabled")` is the
+  only switch.
+- Injection writes only `last_injected_at`, purely observational, read by no
+  decision anywhere.
 
 ### Policy identity and revision
 
 A policy's filename derives from the candidate's `rule_id` (`rule_<slug>.json`),
 not from the proposal id. Revising the same rule therefore **updates the existing
-file**: `version` increments, `created_at` carries forward, a human-granted
-`pinned` survives, and only one policy is injected.
+file**: `version` increments, `created_at` carries forward, and only one policy is injected.
 
 If an existing policy file cannot be parsed, approval **aborts** rather than
-overwriting it — overwriting would reset `version` to 1, reset `created_at` to
-now, and drop the pin. The proposal stays `pending_approval` so it can be
+overwriting it — overwriting would reset `version` to 1 and `created_at` to now. The proposal stays `pending_approval` so it can be
 retried once the file is repaired.
 
 Unparseable proposals are listed by filename in `/proposals`. Excluding them
@@ -230,7 +229,6 @@ evidence byte-for-byte and **never supplies, infers, or improves it**.
 
 ```bash
 venv/bin/python3 -m evolution.test_evidence_gate    # evidence matrix, policy identity, injection != usage
-venv/bin/python3 -m evolution.test_pin_command      # set_policy_pinned() guards and idempotence
 venv/bin/python3 -m evolution.test_command_menu     # command menu / handler consistency
 venv/bin/python3 -m evolution.test_stream_limit     # NDJSON stream limit, watchdog restart contract
 ```

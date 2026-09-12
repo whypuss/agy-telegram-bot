@@ -313,8 +313,7 @@ def build_memory_context() -> str:
         from evolution.lifecycle import get_active_policies, mark_policy_injected
         raw_policies = get_active_policies()
         for p in raw_policies:
-            pin_mark = "[PINNED] " if p.get("pinned") else ""
-            line = f"{pin_mark}{p['summary']} (理由: {p.get('root_cause', '安全邊界')})"
+            line = f"{p['summary']} (理由: {p.get('root_cause', '安全邊界')})"
             # Structured fields are optional. A policy without them — including
             # the handwritten bootstrap one — renders exactly as it always did.
             detail = [

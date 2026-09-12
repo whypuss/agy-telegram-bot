@@ -1259,13 +1259,11 @@ async def cmd_proposals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ptype = p.get("proposal_type") or p.get("type", "policy")
         summary = p.get("summary") or p.get("title", pid)
         root_cause = p.get("root_cause") or p.get("reason", "無")
-        pinned = p.get("pinned", False)
-        pin_badge = " 📌 [Pinned]" if pinned else ""
         conf = p.get("confidence", 0.0)
 
         icon = "🚨 Policy" if "policy" in ptype else "🛠️ Skill"
         lines.append(
-            f"• **[{icon}] {summary}**{pin_badge}\n"
+            f"• **[{icon}] {summary}**\n"
             f"  ID: `{pid}` | 置信度: `{conf:.2f}`\n"
             f"  理由: {root_cause}\n"
         )
