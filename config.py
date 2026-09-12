@@ -182,9 +182,10 @@ def is_authorized(user_id: int) -> bool:
 # Granting a policy permanent exemption from staleness cleanup is a heavier act
 # than ordinary bot use, so it has its own allowlist and NEVER inherits from
 # ALLOWED_USER_IDS — two permission domains that share a default are one domain.
-# Unset, empty, or malformed all resolve to the empty set: /pin and /unpin are
-# then refused for everyone. A half-parsed allowlist is the dangerous outcome,
-# so one bad entry voids the whole value rather than leaving the valid part.
+# Unset, empty, or malformed all resolve to the empty set. No Telegram command
+# reads this today — /pin and /unpin were removed — but a half-parsed allowlist
+# is the dangerous outcome, so one bad entry voids the whole value rather than
+# leaving the valid part behind for whatever reads it next.
 POLICY_ADMIN_IDS: set[int] = set()
 POLICY_ADMIN_CONFIG_ERROR: str = ""
 

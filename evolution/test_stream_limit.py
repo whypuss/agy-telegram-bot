@@ -53,6 +53,41 @@ async def _drain(limit):
     return lines, found, aborted
 
 
+def run_watchdog_restart_contract() -> bool:
+    """A failed restart must report failure, so the cooldown is not started."""
+    print("=== Watchdog restart contract ===")
+    ok = True
+    import watchdog as w
+
+    orig_run, orig_alive = w.subprocess.run, w.is_process_running
+    orig_sleep = w.time.sleep
+    try:
+        w.time.sleep = lambda *_: None          # keep the test fast
+
+        # Every launchctl path "succeeds" but the process never comes back.
+        w.subprocess.run = lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        w.is_process_running = lambda: False
+        good = w.restart_service() is False
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  exit 0 without the process returning reports failure")
+
+        # Process comes back -> success.
+        w.is_process_running = lambda: True
+        good = w.restart_service() is True
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  process returning reports success")
+
+        # Every command fails outright.
+        w.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
+        w.is_process_running = lambda: False
+        good = w.restart_service() is False
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  raising commands report failure")
+        return ok
+    finally:
+        w.subprocess.run, w.is_process_running, w.time.sleep = orig_run, orig_alive, orig_sleep
+
+
 def main():
     print("=== Stream limit ===")
     check("STREAM_LINE_LIMIT is well above asyncio's 64 KiB default",
@@ -77,6 +112,9 @@ def main():
     check("fallback scans NDJSON line by line", 'obj.get("event") == "result"' in src)
     check("fallback reassembles text_delta fragments", 'deltas.append(frag)' in src)
     check("stream abort is logged, not swallowed", "stdout stream aborted" in src)
+
+    ok = run_watchdog_restart_contract()
+    _results.append(ok)
 
     print("\n" + (f"ALL PASS ({len(_results)})" if all(_results)
                   else f"FAILURES: {_results.count(False)}/{len(_results)}"))

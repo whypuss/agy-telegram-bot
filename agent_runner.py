@@ -647,8 +647,10 @@ async def _run_agy_turn(
                 "user_id": user_id
             }
             enqueue_turn(user_id, traj)
-        except Exception:
-            pass
+        except Exception as e:
+            # The queue's whole point is zero-loss review jobs across restarts.
+            logger.error("Review job NOT enqueued, this turn will never be reviewed: %s: %s",
+                         type(e).__name__, e)
         # Record into the rolling cross-backend transcript for handoff
         append_transcript(user_id, "user", "agy", prompt)
         append_transcript(user_id, "assistant", "agy", response_text)

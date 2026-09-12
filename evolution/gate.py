@@ -94,9 +94,9 @@ async def dispatch_candidate(
     #
     # Pinning is never inherited from the candidate. The evaluator is a model and
     # can ask for `pinned: true`; honouring that would let one misjudgement mint a
-    # rule that is permanently exempt from staleness cleanup. Clearing the gate
-    # earns a candidate `active`, not `pinned` — pinning stays a human act via
-    # pin_policy().
+    # standing rule the pipeline granted itself. Clearing the gate earns a
+    # candidate `active`, not `pinned` — set_policy_pinned() is the only writer,
+    # and a person is the only caller.
     if cand.pinned:
         logger.info("📌 [Gate] Ignoring evaluator-requested pinning for %s — "
                     "pinning is a human action, not a pipeline outcome.", cand.rule_id)
@@ -139,7 +139,7 @@ async def dispatch_candidate(
                 text += f"• *受影響行為*: {cand.affected_behavior[:100]}\n"
             if cand.evidence:
                 text += f"• *驗證證據*: _{cand.evidence[:160]}_\n"
-            text += "• _批准後為 active,非 pinned;要 pin 需另行 /pin_\n"
+            text += "• _批准後為 active,非 pinned_\n"
 
             text += f"\n請確認是否批准生效：\n/approve {prop_id} 或點擊下方按鈕"
 
@@ -205,7 +205,11 @@ def approve_proposal(proposal_id: str, approved_by: Optional[int] = None) -> Tup
                 old = json.loads(policy_path.read_text(encoding="utf-8"))
                 version = old.get("version", 1) + 1
                 created_at = old.get("created_at", now)
-            except: pass
+            except Exception as e:
+                # Swallowing this resets version to 1 and created_at to now,
+                # quietly erasing the rule's history on re-approval.
+                logger.error("Cannot read existing policy %s; version and created_at "
+                             "will be reset: %s: %s", rule_id, type(e).__name__, e)
 
         # Evidence is carried through byte-for-byte. A re-compiled policy keeps
         # whatever pinning a human already granted it, but approval never adds it.
@@ -213,8 +217,10 @@ def approve_proposal(proposal_id: str, approved_by: Optional[int] = None) -> Tup
         if policy_path.exists():
             try:
                 was_pinned = bool(json.loads(policy_path.read_text(encoding="utf-8")).get("pinned", False))
-            except Exception:
-                pass
+            except Exception as e:
+                # Defaulting to False silently revokes a pin a human granted.
+                logger.error("Cannot read pinned flag for %s; treating as unpinned: %s: %s",
+                             rule_id, type(e).__name__, e)
 
         policy = VersionedPolicy(
             id=rule_id,
@@ -309,7 +315,7 @@ def set_policy_pinned(policy_id: str, pinned: bool, actor: Optional[int] = None)
     status = d.get("status", "active")
     if status != "active":
         return False, (f"❌ `{policy_id}` 狀態係 `{status}`,唔係 `active` —— 只可以 pin active policy。\n"
-                       f"（archived policy 要先復原,`/pin` 唔會順便 approve 或 compile。）")
+                       f"（archived policy 要先復原;呢個函數唔會順便 approve 或 compile。）")
 
     was = bool(d.get("pinned", False))
     target = bool(pinned)
@@ -357,5 +363,7 @@ def list_pending_proposals() -> List[Dict[str, Any]]:
             d = json.loads(f.read_text(encoding="utf-8"))
             if d.get("status") == "pending_approval":
                 results.append(d)
-        except: pass
+        except Exception as e:
+            logger.error("Proposal not listed, it will be invisible for approval: %s — %s: %s",
+                         f.name, type(e).__name__, e)
     return results

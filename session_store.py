@@ -74,7 +74,10 @@ def load_state() -> None:
                     try:
                         res[int(k)] = v
                     except (ValueError, TypeError):
-                        pass
+                        # Dropping a key loses that user's conversation or model
+                        # binding — they silently start a fresh session.
+                        logger.error("Discarding unreadable state key %r; the binding it "
+                                     "held is lost", k)
                 return res
 
             user_conversations = _int_dict(data.get("conversations", {}))

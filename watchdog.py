@@ -178,32 +178,50 @@ def is_process_running() -> bool:
 
     return False
 
-def restart_service():
+def restart_service() -> bool:
+    """Attempt a restart and report whether the bot actually came back.
+
+    Every path used to return None, and check() started the cooldown regardless.
+    A restart that silently failed was therefore recorded as a restart, and
+    retries were suppressed for 15 minutes while the bot stayed down — the same
+    shape as the outage this watchdog exists to catch.
+    """
     log("[Watchdog] Process not running or dead. Initiating restart...")
     uid = os.getuid()
     label = "com.whypuss.agy-telegram-bot"
     plist_path = Path.home() / f"Library/LaunchAgents/{label}.plist"
 
-    # Kickstart or load
-    try:
-        res = subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], capture_output=True, text=True)
-        if res.returncode == 0:
-            log(f"[Watchdog] Successfully kickstarted {label}")
-            return
-    except Exception:
-        pass
-
+    attempts = [
+        ("kickstart", ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"]),
+    ]
     if plist_path.exists():
-        subprocess.run(["launchctl", "load", "-w", str(plist_path)], capture_output=True)
-        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], capture_output=True)
-        log("[Watchdog] Loaded & kickstarted via plist.")
-        return
-
-    # Fallback to restart.sh
+        attempts.append(("load+kickstart", ["launchctl", "load", "-w", str(plist_path)]))
+        attempts.append(("kickstart after load", ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"]))
     restart_script = BASE_DIR / "restart.sh"
     if restart_script.exists():
-        subprocess.run(["bash", str(restart_script)], capture_output=True)
-        log("[Watchdog] Triggered restart.sh")
+        attempts.append(("restart.sh", ["bash", str(restart_script)]))
+
+    for name, argv in attempts:
+        try:
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            if res.returncode != 0:
+                log(f"[Watchdog] {name} failed (rc={res.returncode}): {(res.stderr or '').strip()[:200]}")
+                continue
+        except Exception as e:
+            log(f"[Watchdog] {name} raised {type(e).__name__}: {e}")
+            continue
+
+        # Success is the process being up, not the command exiting 0.
+        for _ in range(10):
+            time.sleep(1)
+            if is_process_running():
+                log(f"[Watchdog] Restart confirmed via {name}.")
+                return True
+        log(f"[Watchdog] {name} exited 0 but the process did not come back.")
+
+    log("[Watchdog] RESTART FAILED — every path exhausted, bot is still down.")
+    return False
+
 
 def check_alive_but_broken() -> bool:
     """Detect a running process that is no longer doing its job."""
@@ -223,9 +241,12 @@ def check_alive_but_broken() -> bool:
 
 def check():
     if not is_process_running():
-        log("[Watchdog] Process not running. Initiating restart.")
-        restart_service()
-        _mark_restart()
+        if restart_service():
+            _mark_restart()
+        else:
+            # Do not start the cooldown on a failed restart — the next tick,
+            # one minute away, should try again rather than stay quiet.
+            log("[Watchdog] Restart unsuccessful; will retry on the next tick.")
         return
 
     # Check network reachability
@@ -237,8 +258,10 @@ def check():
     if check_alive_but_broken():
         if _restart_allowed():
             log("[Watchdog] Alive but broken. Restarting.")
-            restart_service()
-            _mark_restart()
+            if restart_service():
+                _mark_restart()
+            else:
+                log("[Watchdog] Restart unsuccessful; will retry on the next tick.")
         else:
             log(f"[Watchdog] Alive but broken — restart suppressed, "
                 f"last restart was under {RESTART_COOLDOWN_SECONDS // 60} min ago.")
