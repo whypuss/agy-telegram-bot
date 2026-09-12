@@ -84,6 +84,9 @@ tg-antigravity-bot/
 ├── opencode_runner.py # 本地 OpenCode 後端：NDJSON 串流、Session 持久化與備援執行
 ├── media_handler.py   # 照片、語音、檔案下載快取與本機生成媒體偵測
 ├── ui_components.py   # 模型切換 Inline Keyboard、狀態與說明卡片排版
+├── policy_store.py    # 行為準則讀取與注入（手寫規則，無自動管線）
+├── watchdog.py        # 60 秒守護：存活、alive-but-broken 偵測與可驗證重啟
+├── test_*.py          # 驗收矩陣（注入、指令選單、串流上限與重啟契約）
 ├── requirements.txt   # Python 依賴清單
 ├── .env.example       # 設定檔範本
 └── README.md          # 說明文件
@@ -195,6 +198,95 @@ venv/bin/python3 -m test_policy_store      # 注入、結構化欄位、手動�
 venv/bin/python3 -m test_command_menu      # 指令選單與 handler 一致性
 venv/bin/python3 -m test_stream_limit      # NDJSON 串流上限、watchdog 重啟契約
 ```
+
+---
+
+## 🕳️ 避坑記錄 (Pitfalls)
+
+全部為 2026-09-12 實測所得，非推論。每則附上真實症狀與可搜尋的錯誤字串 —— 這些坑的共同點是**失敗時看起來像正常運作**。
+
+### 1. Bot 停止回應，但 log 全綠
+
+**症狀**：`getUpdates` 持續 `200 OK`，進程存活，watchdog 每分鐘檢查都通過 —— 但所有回覆都發不出去。持續四小時無人察覺。
+
+**真因**：file descriptor 洩漏。`launchctl limit maxfiles` 在 macOS 上 soft limit 只有 **256**，所有 launchd 啟動的服務都繼承它（shell 的 `ulimit -n` 是 1048576，所以手動跑完全正常）。撞頂後 `socket()` 失敗，但已建立的 keep-alive 連線不需要新 fd，因此 polling 照常成功。
+
+**症狀不會說「too many open files」**，而是：
+- `sqlite3.connect()` → `unable to open database file`（檔案明明存在、目錄可寫）
+- `socket()` / `getaddrinfo()` → `[Errno 8] nodename nor servname provided, or not known`（看起來像 DNS 壞了，其實不是）
+
+**診斷**：`lsof -p <pid> | awk '$5=="REG"{print $9}' | sort | uniq -c | sort -rn` —— 同一個檔案開了幾十次就是洩漏。
+
+**加固**：plist 加 `SoftResourceLimits` → `NumberOfFiles` = 8192。
+
+### 2. `with sqlite3.connect(path) as conn:` 不會關閉連線
+
+Python 的 sqlite3 context manager **只管 transaction 的 commit/rollback**，不 close 連線。每 3 秒輪詢一次即每 3 秒洩漏 2 個 fd。必須自己包一層 `finally: conn.close()`。這是上一則的直接成因。
+
+### 3. `/compact` 回傳原始 NDJSON 當「摘要」
+
+**真因**：`asyncio.StreamReader.readline()` 預設單行上限 **64 KiB**。agy 每行一個 JSON 物件，長對話（實測 126 萬 tokens）單行輕易超過。超過時 `readline()` 拋 `ValueError: Separator is found, but chunk is longer than limit`，若被 `except: break` 吞掉，整個 stream 就此中斷 —— 結尾的 `result` 事件永遠收不到，fallback 再用 `json.loads()` 解整份 NDJSON（多於一行必然失敗），最後把原始事件流當成回應輸出。
+
+**修法**：`create_subprocess_exec(..., limit=32*1024*1024)`，並且**不要吞掉 readline 例外**。
+
+同一根因會讓 usage 統計變成 `input_tokens: 0`，因為 usage 在 `result` 事件裡。
+
+### 4. 一句 `hi` 花掉 19,333 tokens
+
+逐層對照實測（模型 Gemini 3.8 Flash (High)）：
+
+| 條件 | input tokens |
+|---|---|
+| 空目錄，無 `--add-dir` | 13,048 |
+| 409 個 dummy 目錄，無 `--add-dir` | 13,050 |
+| `cd ~` 但無 `--add-dir` | 13,065 |
+| `--add-dir ~` | 19,333 |
+
+**`--add-dir` 是唯一開關**：加上它才會載入該目錄的 `AGENTS.md`（+1,477）與 `.agents/skills/` 全部 SKILL.md 描述（+4,808，70 個 × 約 69 tokens），且每個 tool round 重送一次。**cwd 不會觸發**，而不傳 `--add-dir` 並不會失去檔案存取 —— agent 仍以 cwd 讀寫。
+
+agy **不會**注入目錄清單：409 個目錄與空目錄同價，所以貴不是因為 workspace 大。`--disable-slash-commands` 無效（19,339），它只禁 slash 展開。
+
+### 5. `cache_read_tokens: 0` 不代表沒有 prompt caching
+
+單輪測試永遠看到 0，很容易誤判。多輪任務第 3 輪起就命中（實測 16,286 / 16,283 / 16,278 / 20,341）。**用單輪數據下結論會得到相反的答案。**
+
+### 6. Watchdog 報告重啟成功，但 bot 沒有回來
+
+`launchctl kickstart` exit 0 只代表指令被接受，不代表進程起來了。若重啟函式不回報結果、呼叫端又無條件開始冷卻，一次失敗的重啟會被記錄成成功，並靜音 15 分鐘。**成功的定義必須是「進程真的回來了」**，輪詢確認。
+
+### 7. `pkill -f "python.*bot\.py"` 會殺掉別的 bot
+
+本機另有 `~/projects/drawbot/bot.py`。停止腳本必須以 **cwd 範圍**過濾：
+
+```bash
+for PID in $(pgrep -f "[Pp]ython.*bot\.py"); do
+    CWD="$(lsof -a -p "$PID" -d cwd -Fn | grep '^n' | cut -c2-)"
+    [ "$CWD" = "$DIR" ] && kill "$PID"
+done
+```
+
+watchdog 的存活偵測也一樣：範圍太寬會讓一個**已死的 bot 看起來還活著**，永遠不重啟。
+
+### 8. 注入不等於使用
+
+`injected != matched != affected_output`。把「規則進了 prompt」寫進 `last_used_at`，會讓閒置計時器永遠歸零，自動老化因而永不觸發 —— 而依賴該機制的一切（例如豁免老化的 pin）就變成純粹裝飾。**建模前先確認你量度的事件與你要的語義是同一件事。**
+
+### 9. 什麼時候該吞例外
+
+本專案曾有 44 處靜默 `except: pass / break`。逐一審視後只有 5 處是錯的。分界線：
+
+> **這個例外被吞掉之後，有沒有東西已經消失了而沒人知道？**
+
+- 是 → 必須出聲（規則沒載入、狀態綁定遺失、重啟其實失敗了）
+- 否 → 保持安靜（Telegram `edit_text` 失敗、殺一個已死的進程、跳過一行非 JSON）
+
+把 best-effort 的 UI 更新也改成報錯只會製造噪音，**噪音本身是另一種沉默** —— 真正的 ERROR 會被淹沒。
+
+### 10. 驗證中間步驟不等於驗證結果
+
+本次除錯中犯過兩次：確認「protocol.md 載入了 357 tokens」就當規則生效（實際上使用者有既存對話，注入條件 `if not conv_id` 根本不成立，規則從未到達模型）；確認「指令 exit 0」就當重啟成功。
+
+**edit 成功不是行為正確的證據。** 驗證必須落在最終可觀察的行為上 —— 例如直接讀 agy 的 `brain/<conv_id>/.system_generated/logs/transcript_full.jsonl` 確認規則真的進了 prompt。
 
 ---
 

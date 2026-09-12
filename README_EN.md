@@ -84,6 +84,9 @@ tg-antigravity-bot/
 ├── opencode_runner.py # Local OpenCode backend: NDJSON streaming, session persistence & fallback
 ├── media_handler.py   # Inbound media download cache & outbound media detection
 ├── ui_components.py   # Model selector inline keyboards, status & help formatters
+├── policy_store.py    # Reads and injects standing rules (hand-written; no pipeline)
+├── watchdog.py        # 60s guard: liveness, alive-but-broken detection, verified restart
+├── test_*.py          # Acceptance matrices (injection, command menu, stream limit, restart)
 ├── requirements.txt   # Python package dependencies
 ├── .env.example       # Configuration template
 ├── README.md          # Traditional Chinese documentation
@@ -197,6 +200,145 @@ venv/bin/python3 -m test_policy_store      # injection, structured fields, manua
 venv/bin/python3 -m test_command_menu      # command menu / handler consistency
 venv/bin/python3 -m test_stream_limit      # NDJSON stream limit, watchdog restart contract
 ```
+
+---
+
+## 🕳️ Pitfalls
+
+All measured on 2026-09-12, not inferred. Each entry carries the real symptom
+and a searchable error string — what these share is that **failing looks like
+working**.
+
+### 1. The bot stops replying while the logs stay green
+
+**Symptom**: `getUpdates` returns `200 OK` continuously, the process is alive,
+the watchdog passes every minute — and not one reply goes out. Four hours
+unnoticed.
+
+**Cause**: file descriptor exhaustion. `launchctl limit maxfiles` has a soft
+limit of **256** on macOS and every launchd service inherits it (a shell's
+`ulimit -n` is 1048576, so running by hand works fine). Past the limit
+`socket()` fails, but an established keep-alive connection needs no new fd, so
+polling keeps succeeding.
+
+The symptom never says "too many open files". It says:
+- `sqlite3.connect()` → `unable to open database file` (the file exists, the directory is writable)
+- `socket()` / `getaddrinfo()` → `[Errno 8] nodename nor servname provided, or not known` (looks like DNS; is not)
+
+**Diagnosis**: `lsof -p <pid> | awk '$5=="REG"{print $9}' | sort | uniq -c | sort -rn` — the same file opened dozens of times is the leak.
+
+**Hardening**: add `SoftResourceLimits` → `NumberOfFiles` = 8192 to the plist.
+
+### 2. `with sqlite3.connect(path) as conn:` does not close the connection
+
+Python's sqlite3 context manager **only manages the transaction**. It commits
+or rolls back; it never closes. A 3-second poll loop leaked 2 fds every 3
+seconds. Wrap it yourself with `finally: conn.close()`. This was the direct
+cause of the item above.
+
+### 3. `/compact` returned raw NDJSON as its "summary"
+
+**Cause**: `asyncio.StreamReader.readline()` defaults to a **64 KiB** per-line
+limit. agy emits one JSON object per line, and a long turn (1.26M tokens here)
+exceeds that easily. `readline()` then raises
+`ValueError: Separator is found, but chunk is longer than limit`; if that is
+swallowed by `except: break`, the stream is abandoned, the terminating `result`
+event never arrives, and a fallback running `json.loads()` over the whole NDJSON
+buffer (which cannot parse more than one line) echoes the raw event stream as
+the response.
+
+**Fix**: `create_subprocess_exec(..., limit=32*1024*1024)`, and **do not swallow
+readline errors**.
+
+The same root cause reports `input_tokens: 0`, because usage lives in the
+`result` event.
+
+### 4. A bare `hi` costing 19,333 tokens
+
+Layer-by-layer measurement (Gemini 3.8 Flash (High)):
+
+| Condition | input tokens |
+|---|---|
+| Empty directory, no `--add-dir` | 13,048 |
+| 409 dummy directories, no `--add-dir` | 13,050 |
+| `cd ~` but no `--add-dir` | 13,065 |
+| `--add-dir ~` | 19,333 |
+
+**`--add-dir` is the only trigger**: it loads that directory's `AGENTS.md`
+(+1,477) and every SKILL.md description under `.agents/skills/` (+4,808 — 70
+skills at ~69 tokens each), re-sent on every tool round. **cwd does not trigger
+it**, and omitting the flag costs no file access — the agent still reads and
+writes via cwd.
+
+agy does **not** inject a directory listing: 409 directories cost the same as an
+empty one, so the price is not about workspace size. `--disable-slash-commands`
+does nothing (19,339); it only disables slash expansion.
+
+### 5. `cache_read_tokens: 0` does not mean caching is off
+
+A single-turn test always shows 0, which is easy to misread. In a multi-round
+task it engages from round 3 (measured: 16,286 / 16,283 / 16,278 / 20,341).
+**Concluding from single-turn data gives you the opposite answer.**
+
+### 6. The watchdog reported a successful restart; the bot never came back
+
+`launchctl kickstart` exiting 0 means the command was accepted, not that the
+process started. If the restart function reports nothing and the caller starts
+its cooldown unconditionally, a failed restart is recorded as a success and
+suppresses retries. **Success must be defined as the process actually being
+back**, confirmed by polling.
+
+### 7. `pkill -f "python.*bot\.py"` kills other bots
+
+This machine also has `~/projects/drawbot/bot.py`. Stop scripts must filter by
+**cwd**:
+
+```bash
+for PID in $(pgrep -f "[Pp]ython.*bot\.py"); do
+    CWD="$(lsof -a -p "$PID" -d cwd -Fn | grep '^n' | cut -c2-)"
+    [ "$CWD" = "$DIR" ] && kill "$PID"
+done
+```
+
+Liveness detection needs the same scoping: too broad, and **a dead bot looks
+alive** and is never restarted.
+
+### 8. Injection is not usage
+
+`injected != matched != affected_output`. Writing "the rule entered the prompt"
+into `last_used_at` keeps the idle timer permanently reset, so automatic ageing
+never fires — and anything depending on it (such as a pin that exempts a rule
+from ageing) becomes decoration. **Check that the event you measure is the same
+event as the semantics you want.**
+
+### 9. When to swallow an exception
+
+This project had 44 silent `except: pass / break`. Reviewing each, only 5 were
+wrong. The line:
+
+> **After this exception is swallowed, has something disappeared without anyone
+> knowing?**
+
+- Yes → it must speak (a rule not loaded, a state binding lost, a restart that
+  did not happen)
+- No → stay quiet (a failed Telegram `edit_text`, killing an already-dead
+  process, skipping a non-JSON line)
+
+Turning best-effort UI updates into errors only manufactures noise, and **noise
+is another kind of silence** — the real ERROR drowns in it.
+
+### 10. Verifying a step is not verifying the result
+
+Committed twice during this debugging session: confirming "protocol.md loaded,
+357 tokens" and treating the rule as in force (the user had an existing
+conversation, so the `if not conv_id` injection condition never held and the
+rule never reached the model); and confirming "the command exited 0" and
+treating the restart as done.
+
+**A successful edit is not evidence of correct behaviour.** Verification has to
+land on the final observable behaviour — here, reading agy's own
+`brain/<conv_id>/.system_generated/logs/transcript_full.jsonl` to confirm the
+rule actually entered the prompt.
 
 ---
 
