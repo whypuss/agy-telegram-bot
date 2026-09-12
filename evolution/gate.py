@@ -104,6 +104,7 @@ async def dispatch_candidate(
     prop_id = f"p_{int(time.time())}_{cand.rule_id[:16]}"
     proposal = Proposal(
         id=prop_id,
+        rule_id=_policy_id_for(cand.rule_id),
         proposal_type=cand.candidate_type,
         summary=cand.summary,
         root_cause=cand.root_cause,
@@ -196,31 +197,36 @@ def approve_proposal(proposal_id: str, approved_by: Optional[int] = None) -> Tup
 
     # 1. Compile Policy
     if prop_type == "policy_proposal":
-        rule_id = data.get("id", proposal_id).replace("p_", "rule_")
+        # Identity comes from the rule, never from the proposal id. Deriving it
+        # from `p_<timestamp>_<name>` meant every approval landed on a fresh
+        # filename, so policy_path.exists() was never true: version stayed at 1,
+        # created_at and pinned were never carried forward, and revising a rule
+        # left the superseded copy active and still being injected.
+        rule_id = data.get("rule_id") or _policy_id_for(
+            data.get("id", proposal_id).split("_", 2)[-1])
         policy_path = POLICIES_DIR / f"{rule_id}.json"
         version = 1
         created_at = now
+        was_pinned = False
+
+        # Read the superseded policy once. If it exists but cannot be read, stop:
+        # compiling over it would reset version to 1, reset created_at to now, and
+        # drop any pin a person granted — destroying the rule's history to publish
+        # a revision. Refusing costs an approval; overwriting costs the record.
         if policy_path.exists():
             try:
                 old = json.loads(policy_path.read_text(encoding="utf-8"))
-                version = old.get("version", 1) + 1
-                created_at = old.get("created_at", now)
             except Exception as e:
-                # Swallowing this resets version to 1 and created_at to now,
-                # quietly erasing the rule's history on re-approval.
-                logger.error("Cannot read existing policy %s; version and created_at "
-                             "will be reset: %s: %s", rule_id, type(e).__name__, e)
-
-        # Evidence is carried through byte-for-byte. A re-compiled policy keeps
-        # whatever pinning a human already granted it, but approval never adds it.
-        was_pinned = False
-        if policy_path.exists():
-            try:
-                was_pinned = bool(json.loads(policy_path.read_text(encoding="utf-8")).get("pinned", False))
-            except Exception as e:
-                # Defaulting to False silently revokes a pin a human granted.
-                logger.error("Cannot read pinned flag for %s; treating as unpinned: %s: %s",
+                logger.error("Refusing to compile over unreadable policy %s: %s: %s",
                              rule_id, type(e).__name__, e)
+                return False, (f"❌ 現有 policy `{rule_id}` 讀唔到（{type(e).__name__}）,"
+                               f"已中止批准。\n覆寫會令 version、created_at 同 pinned 全部消失,"
+                               f"所以寧可失敗。請先修復或移除該檔案再重試。")
+            version = old.get("version", 1) + 1
+            created_at = old.get("created_at", now)
+            # A re-compiled policy keeps whatever pinning a human already granted
+            # it, but approval never adds it.
+            was_pinned = bool(old.get("pinned", False))
 
         policy = VersionedPolicy(
             id=rule_id,
@@ -290,6 +296,12 @@ _RULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _PIN_MUTABLE = {"pinned", "pinned_by", "pinned_at", "last_updated"}
 
 
+def _policy_id_for(rule_name: str) -> str:
+    """Map a candidate's rule_id to its stable policy filename stem."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (rule_name or "").strip()).strip("-._")[:64]
+    return f"rule_{slug or 'unnamed'}"
+
+
 def set_policy_pinned(policy_id: str, pinned: bool, actor: Optional[int] = None) -> Tuple[bool, str]:
     """Pin or unpin an existing active policy. Human action only.
 
@@ -353,6 +365,22 @@ def set_policy_pinned(policy_id: str, pinned: bool, actor: Optional[int] = None)
                   f"• status: `{status}`\n"
                   f"• path: `{policy_path}`\n"
                   f"{tail}")
+
+
+def list_unreadable_proposals() -> List[str]:
+    """Filenames of proposals that cannot be parsed.
+
+    They are excluded from the pending list, which on its own makes the bot
+    report "nothing pending" while a proposal sits unapprovable on disk — a
+    false statement, not merely a missing one. Callers surface this count.
+    """
+    bad = []
+    for f in sorted(PROPOSALS_DIR.glob("*.json")):
+        try:
+            json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            bad.append(f.name)
+    return bad
 
 
 def list_pending_proposals() -> List[Dict[str, Any]]:

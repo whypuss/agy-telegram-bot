@@ -95,6 +95,7 @@ from evolution import (
     approve_proposal,
     reject_proposal,
     list_pending_proposals,
+    list_unreadable_proposals,
     get_proposal,
 )
 
@@ -1238,11 +1239,14 @@ async def cmd_proposals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     proposals = list_pending_proposals()
+    unreadable = list_unreadable_proposals()
+    broken_note = ("\n\n⚠️ 另有 %d 個提案檔案損壞、無法解析,唔會出現喺上面亦批准唔到:\n%s"
+                   % (len(unreadable), "\n".join(f"• `{n}`" for n in unreadable))) if unreadable else ""
     if not proposals:
         await send_formatted_reply(
             update=update,
             context=context,
-            text="✨ 目前沒有待審批的自我進化提案 (Pending Proposals 為空)。",
+            text="✨ 目前沒有待審批的自我進化提案 (Pending Proposals 為空)。" + broken_note,
             reply_to_message_id=update.message.message_id if update.message else None,
         )
         return
@@ -1271,6 +1275,8 @@ async def cmd_proposals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ])
 
     lines.append("💡 點擊下方按鈕或使用 `/approve <id>` / `/reject <id>` 進行審核。")
+    if broken_note:
+        lines.append(broken_note)
     kb = InlineKeyboardMarkup(buttons)
     await update.message.reply_text(
         text="\n".join(lines),

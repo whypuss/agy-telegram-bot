@@ -42,6 +42,10 @@ class Proposal:
     skill_class: Optional[str]
     confidence: float
     created_at: int
+    # Stable identity of the rule this proposal revises, independent of when it
+    # was proposed. Approval compiles into rule_<this>, so a revision updates the
+    # existing policy instead of minting a parallel one.
+    rule_id: str = ""
     affected_behavior: str = ""
     trigger: str = ""
     constraint: str = ""

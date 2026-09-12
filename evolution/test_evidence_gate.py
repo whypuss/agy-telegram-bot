@@ -192,9 +192,79 @@ def run_injection_is_not_usage() -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def run_policy_identity() -> bool:
+    """A revision must update the rule, not mint a parallel copy of it."""
+    print("=== Policy identity ===")
+    ok = True
+    tmp = Path(tempfile.mkdtemp())
+    from evolution import lifecycle
+    o1, o2, o3 = gate.PROPOSALS_DIR, gate.POLICIES_DIR, lifecycle.POLICIES_DIR
+    gate.PROPOSALS_DIR = tmp / "prop"
+    gate.POLICIES_DIR = lifecycle.POLICIES_DIR = tmp / "pol"
+    gate.PROPOSALS_DIR.mkdir(parents=True)
+    gate.POLICIES_DIR.mkdir(parents=True)
+    try:
+        def cand(summary):
+            return EvolutionCandidate(
+                candidate_type="policy_proposal", scope="permanent", rule_id="prod-guard",
+                summary=summary, root_cause="r", confidence=0.95,
+                affected_behavior="gateway restart handler must return success",
+                evidence="curl /gateway/restart -> HTTP/1.1 200 OK (was: connection reset), 14 lines")
+
+        p1 = asyncio.run(gate.dispatch_candidate(cand("Audit before restarting production.")))
+        gate.approve_proposal(p1, approved_by=1)
+        first = json.loads((gate.POLICIES_DIR / "rule_prod-guard.json").read_text())
+        gate.set_policy_pinned("rule_prod-guard", True, actor=1)
+
+        p2 = asyncio.run(gate.dispatch_candidate(cand("Audit AND back up before restarting.")))
+        gate.approve_proposal(p2, approved_by=1)
+        d = json.loads((gate.POLICIES_DIR / "rule_prod-guard.json").read_text())
+
+        good = len(list(gate.POLICIES_DIR.glob("*.json"))) == 1
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  revision updates one file, no duplicate policy")
+        good = d["version"] == first["version"] + 1
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  version bumps on revision")
+        good = d["created_at"] == first["created_at"]
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  created_at is carried forward")
+        good = d["pinned"] is True
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  a human's pin survives a revision")
+        good = len(lifecycle.get_active_policies()) == 1
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  only one policy is injected")
+
+        # A corrupt existing policy must abort the approval, not be overwritten.
+        corrupt = '{"id":"rule_x","version":7,"pinned":true TRUNCATED'
+        (gate.POLICIES_DIR / "rule_abort-me.json").write_text(corrupt)
+        c = cand("Audit before restarting production.")
+        c.rule_id = "abort-me"
+        p3 = asyncio.run(gate.dispatch_candidate(c))
+        succeeded, msg = gate.approve_proposal(p3, approved_by=1)
+        good = not succeeded and (gate.POLICIES_DIR / "rule_abort-me.json").read_text() == corrupt
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  unreadable policy aborts approval, file untouched")
+        good = json.loads((gate.PROPOSALS_DIR / f"{p3}.json").read_text())["status"] == "pending_approval"
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  proposal stays pending so it can be retried")
+
+        # A corrupt proposal must be reported, not silently absent.
+        (gate.PROPOSALS_DIR / "p_bad.json").write_text("{ broken")
+        good = "p_bad.json" in gate.list_unreadable_proposals()
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  unreadable proposals are reportable, not invisible")
+        return ok
+    finally:
+        gate.PROPOSALS_DIR, gate.POLICIES_DIR, lifecycle.POLICIES_DIR = o1, o2, o3
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     a, b = run_matrix(), run_structural()
     b = b and run_structured_fields()
     b = b and run_injection_is_not_usage()
+    b = b and run_policy_identity()
     print("\n" + ("ALL PASS" if a and b else "FAILURES PRESENT"))
     raise SystemExit(0 if a and b else 1)
