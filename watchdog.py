@@ -150,10 +150,17 @@ def is_process_running() -> bool:
     except Exception:
         pass
 
+    # Fallback: match any python bot.py, but only count it if its cwd is this
+    # directory. A bare `python.*bot\.py` also matches drawbot, which would make
+    # the watchdog believe a dead bot is alive and never restart it.
     try:
-        res = subprocess.run(["pgrep", "-f", "python.*bot\\.py"], capture_output=True, text=True)
-        if res.returncode == 0 and res.stdout.strip():
-            return True
+        res = subprocess.run(["pgrep", "-f", "[Pp]ython.*bot\\.py"], capture_output=True, text=True)
+        for pid in res.stdout.split():
+            cwd = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                                 capture_output=True, text=True).stdout
+            for line in cwd.splitlines():
+                if line.startswith("n") and line[1:] == str(BASE_DIR):
+                    return True
     except Exception:
         pass
 

@@ -9,6 +9,8 @@ if [ -f "$PLIST" ]; then
     launchctl kickstart -k "gui/$UID_NUM/$LABEL" 2>/dev/null || true
     echo "Service started via launchd. Check status with ./status.sh"
 else
+    echo "Starting via nohup in background..."
     nohup "$DIR/venv/bin/python3" "$DIR/bot.py" > "$DIR/bot.log" 2>&1 &
-    echo "Started PID: $!"
+    echo "$!" > "$DIR/.bot.pid"
+    echo "Started PID: $! (saved to .bot.pid)"
 fi
