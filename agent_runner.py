@@ -632,24 +632,12 @@ async def _run_agy_turn(
         else:
             response_text = "（Agent 回覆為空）"
 
-    # Continual Listening & Runtime Evolution Reviewer in background
+    # Background memory extraction from the completed turn
     if response_text and not response_text.startswith("❌"):
         try:
-            # 1. Legacy fast memory extractor
             asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
-            # 2. Hermes-style durable Evolution Queue (durable trajectory analysis)
-            from evolution.queue import enqueue_turn
-            traj = {
-                "user_prompt": prompt,
-                "agent_response": response_text,
-                "backend": "agy",
-                "timestamp": int(time.time()),
-                "user_id": user_id
-            }
-            enqueue_turn(user_id, traj)
         except Exception as e:
-            # The queue's whole point is zero-loss review jobs across restarts.
-            logger.error("Review job NOT enqueued, this turn will never be reviewed: %s: %s",
+            logger.error("Memory extraction not scheduled for this turn: %s: %s",
                          type(e).__name__, e)
         # Record into the rolling cross-backend transcript for handoff
         append_transcript(user_id, "user", "agy", prompt)

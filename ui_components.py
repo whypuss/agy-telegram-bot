@@ -382,7 +382,6 @@ def format_help_card(current_model: str, timeout_seconds: int) -> str:
         "• `/model` — 🧠 點擊按鈕互動式切換 AI 模型（含 💻 本地 OpenCode 模型，選 OC 模型即切換後端）\n"
         "• `/model <名稱>` — ⌨️ 直接切換，例如 `/model deepseek`、`/model spark`、`/model 3.8`\n"
         "• `/memory` — 🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)\n"
-        "• `/proposals` — 📜 查看待審批的自我進化提案 (Policies / Skills)\n"
         "• `/compact` — 📦 壓縮當前上下文（瘦身並保留關鍵記憶）\n"
         "• `/reset` 或 `/new` — 🔄 開啟全新對話會話\n"
         "• `/status` — 📈 查看目前 Agent 狀態與會話資訊\n"

@@ -161,84 +161,42 @@ python bot.py
 | `/steer <text>` | Abort the current task, discard accumulated corrections, and restart with a new instruction |
 | `/clear` | Purge local temporary media cache files |
 | `/help` | Display comprehensive command and feature guide |
-| `/proposals` | 📜 List self-evolution proposals awaiting approval |
-| `/approve <id>` / `/reject <id>` | Approve or reject a proposal |
 
 ---
 
-## 🧬 Self-Evolution: Evidence Gate and Policy Management
+## 🧬 Policy Injection
 
-### No automatic ageing, and no pinning
+At the start of every new conversation, every rule in `MEMORY_DIR/policies/`
+with `status: active` is injected into the prompt under a
+`🚨 HARDLINE BEHAVIOR POLICIES` heading. Rules are **hand-written JSON files**.
 
-The only signal available is that a rule was injected into a prompt — which is
-not evidence it applied to the task, and not evidence it changed the output:
+- `status: active` is injected, anything else is not. Deleting a rule means
+  removing its file.
+- `policy_store.set_policy_status(rule_id, "active" | "disabled")` is the only
+  switch. Nothing ages automatically.
+- Injection writes only `last_injected_at`, purely observational:
+  **injection is not usage.** The system knows a rule entered the prompt, not
+  that it applied to the task, and not that it changed the output.
+- A rule that fails to load logs `POLICY NOT LOADED`; losing all of them logs
+  `HARDLINE POLICIES NOT INJECTED`. A constraint that vanishes without a word is
+  exactly what this module exists to prevent.
 
-```
-injected  !=  matched  !=  affected_output
-```
+### The automatic pipeline that used to be here
 
-Treating injection as usage kept the idle timer permanently reset, so automatic
-ageing could never fire. The stale/archive machinery, and the `pinned` flag whose
-sole effect was exempting a policy from it, have been **removed outright** rather
-than disabled: a feature that still ships its API, its directories and its status
-values is not switched off, merely quiet.
+An LLM evaluator → evidence gate → proposal queue → human approval → rule
+compiler pipeline lived in `evolution/`. It produced **zero rules** across its
+entire lifetime: the evaluator needed an auxiliary API key that was never set,
+so no candidate was ever generated. Meanwhile its queue accumulated one
+unconsumed job per turn, and its polling was the source of a file descriptor
+leak that took the bot off the air for hours.
 
-- Policy state is human-managed: `status: active` is injected, anything else is
-  not; deleting a rule means removing its file.
-- `evolution.lifecycle.set_policy_status(rule_id, "active" | "disabled")` is the
-  only switch.
-- Injection writes only `last_injected_at`, purely observational, read by no
-  decision anywhere.
-
-### Policy identity and revision
-
-A policy's filename derives from the candidate's `rule_id` (`rule_<slug>.json`),
-not from the proposal id. Revising the same rule therefore **updates the existing
-file**: `version` increments, `created_at` carries forward, and only one policy is injected.
-
-If an existing policy file cannot be parsed, approval **aborts** rather than
-overwriting it — overwriting would reset `version` to 1 and `created_at` to now. The proposal stays `pending_approval` so it can be
-retried once the file is repaired.
-
-Unparseable proposals are listed by filename in `/proposals`. Excluding them
-silently made the bot report "no proposals pending" while an unapprovable one
-sat on disk — a false statement, not merely a missing one.
-
-### Evidence Gate
-
-A candidate that would become a standing rule (`policy_proposal` / `skill_patch`)
-must clear the deterministic checks in `evolution/evidence.py`. The invariant:
-
-> No candidate may be promoted unless its evidence records an actual
-> verification that exercises the affected behavior; successful execution alone
-> is insufficient.
-
-Rejected, each with its own diagnostic code:
-
-| Case | Code |
-|---|---|
-| No evidence / blank | `missing_evidence` |
-| Subjective claim only ("fixed", "works now") | `subjective_only` |
-| Exit code 0 / "command succeeded" only | `exit_code_only` |
-| Generic check only (lint / import / JSON parse) | `generic_check_only` |
-| Concrete output unrelated to the affected behavior | `unrelated_evidence` |
-
-The gate runs at dispatch and again at compile, so a proposal hand-edited on
-disk to strip its evidence cannot be approved. The compiler preserves validated
-evidence byte-for-byte and **never supplies, infers, or improves it**.
+The package has been removed. Every rule now in force was written by a person.
 
 ```bash
-venv/bin/python3 -m evolution.test_evidence_gate    # evidence matrix, policy identity, injection != usage
-venv/bin/python3 -m evolution.test_command_menu     # command menu / handler consistency
-venv/bin/python3 -m evolution.test_stream_limit     # NDJSON stream limit, watchdog restart contract
+venv/bin/python3 -m test_policy_store      # injection, structured fields, manual control, loud failure
+venv/bin/python3 -m test_command_menu      # command menu / handler consistency
+venv/bin/python3 -m test_stream_limit      # NDJSON stream limit, watchdog restart contract
 ```
-
-### The background reviewer needs an auxiliary API key
-
-`evolution/evaluator.py` requires `SENSENOVA_API_KEY` or `OPENROUTER_API_KEY`.
-With neither set the background worker **does not start** (avoiding a pointless
-poll loop); review jobs queue durably and are processed once a key is
-configured. Everything else is unaffected.
 
 ---
 

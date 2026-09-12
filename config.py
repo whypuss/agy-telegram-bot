@@ -178,39 +178,3 @@ def is_authorized(user_id: int) -> bool:
         return False
     return user_id in ALLOWED_USER_IDS
 
-
-# Granting a policy permanent exemption from staleness cleanup is a heavier act
-# than ordinary bot use, so it has its own allowlist and NEVER inherits from
-# ALLOWED_USER_IDS — two permission domains that share a default are one domain.
-# Unset, empty, or malformed all resolve to the empty set. No Telegram command
-# reads this today — /pin and /unpin were removed — but a half-parsed allowlist
-# is the dangerous outcome, so one bad entry voids the whole value rather than
-# leaving the valid part behind for whatever reads it next.
-POLICY_ADMIN_IDS: set[int] = set()
-POLICY_ADMIN_CONFIG_ERROR: str = ""
-
-_raw_admins = os.getenv("POLICY_ADMIN_IDS", "").strip()
-if not _raw_admins:
-    POLICY_ADMIN_CONFIG_ERROR = "POLICY_ADMIN_IDS 未設定"
-else:
-    _parsed: set[int] = set()
-    for _tok in _raw_admins.replace(";", ",").split(","):
-        _tok = _tok.strip()
-        if not _tok:
-            continue
-        if not _tok.lstrip("-").isdigit():
-            POLICY_ADMIN_CONFIG_ERROR = f"POLICY_ADMIN_IDS 含無效項目 {_tok!r}"
-            _parsed = set()
-            break
-        _parsed.add(int(_tok))
-    else:
-        if not _parsed:
-            POLICY_ADMIN_CONFIG_ERROR = "POLICY_ADMIN_IDS 設定咗但解析唔到任何 ID"
-    POLICY_ADMIN_IDS = _parsed
-
-
-def is_policy_admin(user_id: int) -> bool:
-    """Only an explicitly bound admin may pin or unpin a policy."""
-    if not POLICY_ADMIN_IDS:
-        return False
-    return user_id in POLICY_ADMIN_IDS

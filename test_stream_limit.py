@@ -1,7 +1,10 @@
-"""Regression for the NDJSON stream truncation that made /compact return raw
-protocol output as its summary.
+"""NDJSON stream limit and watchdog restart contract.
 
-Run: venv/bin/python3 -m evolution.test_stream_limit
+Regression for two failures that both presented as something else: /compact
+returning its own event stream as a "summary", and a failed restart being
+recorded as a successful one.
+
+Run: venv/bin/python3 -m test_stream_limit
 """
 import asyncio
 import json
@@ -59,8 +62,7 @@ def run_watchdog_restart_contract() -> bool:
     ok = True
     import watchdog as w
 
-    orig_run, orig_alive = w.subprocess.run, w.is_process_running
-    orig_sleep = w.time.sleep
+    orig_run, orig_alive, orig_sleep = w.subprocess.run, w.is_process_running, w.time.sleep
     try:
         w.time.sleep = lambda *_: None          # keep the test fast
 
@@ -71,13 +73,11 @@ def run_watchdog_restart_contract() -> bool:
         ok &= good
         print(f"  {'PASS' if good else 'FAIL'}  exit 0 without the process returning reports failure")
 
-        # Process comes back -> success.
         w.is_process_running = lambda: True
         good = w.restart_service() is True
         ok &= good
         print(f"  {'PASS' if good else 'FAIL'}  process returning reports success")
 
-        # Every command fails outright.
         w.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
         w.is_process_running = lambda: False
         good = w.restart_service() is False
@@ -98,7 +98,6 @@ def main():
     check("at the old 64 KiB limit the stream aborts", aborted is not None, str(aborted))
     check("at the old limit the result event is lost", found is None, str(found))
 
-    # With the configured limit the whole stream survives.
     lines, found, aborted = asyncio.run(_drain(STREAM_LINE_LIMIT))
     check("at the configured limit the stream completes", aborted is None, str(aborted))
     check("all three events are read", len(lines) == 3, str(len(lines)))
@@ -106,15 +105,13 @@ def main():
     check("usage recovered", bool(found) and found["usage"]["input_tokens"] == 123, str(found))
 
     print("=== Fallback salvage ===")
-    # Even with no result event, the fallback must not echo protocol noise.
     import agent_runner
     src = open(agent_runner.__file__, encoding="utf-8").read()
     check("fallback scans NDJSON line by line", 'obj.get("event") == "result"' in src)
     check("fallback reassembles text_delta fragments", 'deltas.append(frag)' in src)
     check("stream abort is logged, not swallowed", "stdout stream aborted" in src)
 
-    ok = run_watchdog_restart_contract()
-    _results.append(ok)
+    _results.append(run_watchdog_restart_contract())
 
     print("\n" + (f"ALL PASS ({len(_results)})" if all(_results)
                   else f"FAILURES: {_results.count(False)}/{len(_results)}"))

@@ -158,64 +158,43 @@ python bot.py
 | `/steer <內容>` | 中止目前任務，清空已累積修正並以新指示立即重跑 |
 | `/clear` | 清理本機快取的多模態暫存檔案 |
 | `/help` | 顯示完整功能說明卡片 |
-| `/proposals` | 📜 查看待審批的自我進化提案 |
-| `/approve <id>` / `/reject <id>` | 批准或駁回提案 |
 
 ---
 
-## 🧬 自我進化：證據門檻與 Policy 管理
+## 🧬 行為準則注入 (Policy Injection)
 
-### 沒有自動老化，也沒有 pin
+每個新對話開始時，`MEMORY_DIR/policies/` 下所有 `status: active` 的規則會注入 prompt，置於 `🚨 HARDLINE BEHAVIOR POLICIES` 標題之下。規則是**手寫的 JSON 檔**。
 
-系統唯一擁有的訊號是「規則曾被注入 prompt」，而這並不代表它與任務相關，更不代表它影響了輸出：
-
+```json
+{
+  "id": "rule_evidence-discipline",
+  "summary": "一句指令式規則",
+  "root_cause": "為何需要這條規則",
+  "evidence": "來源／依據",
+  "trigger": "（選填）何時適用",
+  "constraint": "（選填）禁止或必須做什麼",
+  "verification": "（選填）如何自證遵守",
+  "version": 1, "created_at": 0, "last_updated": 0,
+  "status": "active"
+}
 ```
-injected  !=  matched  !=  affected_output
-```
 
-以注入當成使用，會讓閒置計時器永遠歸零，自動老化因而永遠不會觸發。stale / archive 機制，以及唯一作用是豁免該機制的 `pinned` 欄位，**已整套移除**而非停用 —— 一個仍然保留 API、目錄與狀態值的功能並沒有被關掉，只是安靜了。
+- `status: active` 會注入，其餘不會。刪除規則就是移除檔案。
+- `policy_store.set_policy_status(rule_id, "active" | "disabled")` 是唯一的開關。沒有自動老化。
+- 注入只寫 `last_injected_at`，純屬觀察：**注入不等於使用**。系統只知道規則進了 prompt，不知道它是否與任務相關，更不知道是否影響了輸出。
+- 規則載入失敗會記錄 `POLICY NOT LOADED`，全部注入失敗會記錄 `HARDLINE POLICIES NOT INJECTED`。一條無聲消失的約束正是這個模組要防的事。
 
-- Policy 狀態由人管理：`status: active` 會被注入，其餘不會；刪除規則就是移除檔案。
-- `evolution.lifecycle.set_policy_status(rule_id, "active" | "disabled")` 是唯一的開關。
-- 注入只寫 `last_injected_at`，純屬觀察用途，沒有任何程式碼讀它做決策。
+### 曾經存在的自動管線
 
-### Policy 身分與修訂
+一套 LLM evaluator → 證據門檻 → 提案佇列 → 人工審批 → 規則編譯的管線曾經存在於 `evolution/`。它在整個生命週期中產出了 **0 條規則**：evaluator 需要輔助 API key，未曾設定，因此從未產生過任何 candidate。與此同時它的佇列每輪對話寫入一筆無人消費的 job，其輪詢是一次 file descriptor 洩漏的來源，並曾導致 Bot 停止回應數小時。
 
-Policy 檔名由 candidate 的 `rule_id` 決定（`rule_<slug>.json`），而非提案 ID。因此修訂同一條規則會**更新原檔**：`version` 遞增、`created_at` 承接、注入的仍然只有一條。
-
-若既有 policy 檔案無法解析，批准會**中止**而不是覆寫 —— 覆寫會將 `version` 重設為 1、`created_at` 重設為現在。提案維持 `pending_approval`，修復檔案後可重試。
-
-無法解析的提案會在 `/proposals` 中列出檔名。將它們靜默排除，會讓 Bot 在磁碟上確實躺著一個無法批准的提案時，回報「目前沒有待審批的自我進化提案」——那是錯誤的陳述，而不只是缺漏。
-
-### 證據門檻（Evidence Gate）
-
-升格為長期規則的 candidate（`policy_proposal` / `skill_patch`）必須通過 `evolution/evidence.py` 的確定性檢查。核心不變式：
-
-> 沒有任何 candidate 可以升格，除非其 evidence 記錄了一次**實際驗證且該驗證有 exercise 到所宣稱的受影響行為**；單純執行成功並不足夠。
-
-以下會被拒絕，各有獨立診斷碼：
-
-| 情況 | 拒絕碼 |
-|---|---|
-| 無 evidence / 空白 | `missing_evidence` |
-| 只有主觀結論（「已修復」「works now」） | `subjective_only` |
-| 只有 exit code 0 / 「命令成功」 | `exit_code_only` |
-| 只有泛用檢查（lint / import / JSON parse） | `generic_check_only` |
-| 具體輸出但與受影響行為無關 | `unrelated_evidence` |
-
-門檻在 dispatch 與 compile 兩處各檢查一次，因此手動編輯磁碟上的 proposal 抽走 evidence 也無法批准。Compiler 逐字保留已驗證的 evidence，**不會代為生成、推斷或美化**。
-
-執行驗收矩陣：
+該套件已整個移除。目前生效的規則全部由人撰寫。
 
 ```bash
-venv/bin/python3 -m evolution.test_evidence_gate    # 證據矩陣、policy 身分與修訂、注入 != 使用
-venv/bin/python3 -m evolution.test_command_menu     # 指令選單與 handler 一致性
-venv/bin/python3 -m evolution.test_stream_limit     # NDJSON 串流上限、watchdog 重啟契約
+venv/bin/python3 -m test_policy_store      # 注入、結構化欄位、手動開關、失敗可見性
+venv/bin/python3 -m test_command_menu      # 指令選單與 handler 一致性
+venv/bin/python3 -m test_stream_limit      # NDJSON 串流上限、watchdog 重啟契約
 ```
-
-### 背景 Reviewer 需要輔助 API Key
-
-`evolution/evaluator.py` 需要 `SENSENOVA_API_KEY` 或 `OPENROUTER_API_KEY`。兩者皆未設定時，背景 worker **不會啟動**（避免無意義的輪詢），提案管線靜默停用，其餘功能正常。
 
 ---
 

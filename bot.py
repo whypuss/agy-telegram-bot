@@ -89,15 +89,6 @@ from ui_components import (
     format_help_card,
     resolve_model_alias,
 )
-from evolution import (
-    start_evolution_worker,
-    set_bot_instance,
-    approve_proposal,
-    reject_proposal,
-    list_pending_proposals,
-    list_unreadable_proposals,
-    get_proposal,
-)
 
 # ---------------------------------------------------------------------------
 # Logging Setup
@@ -1232,108 +1223,6 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-async def cmd_proposals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /proposals to list pending self-evolution proposals awaiting human approval."""
-    uid = update.effective_user.id
-    if not is_authorized(uid):
-        return
-
-    proposals = list_pending_proposals()
-    unreadable = list_unreadable_proposals()
-    broken_note = ("\n\n⚠️ 另有 %d 個提案檔案損壞、無法解析,唔會出現喺上面亦批准唔到:\n%s"
-                   % (len(unreadable), "\n".join(f"• `{n}`" for n in unreadable))) if unreadable else ""
-    if not proposals:
-        await send_formatted_reply(
-            update=update,
-            context=context,
-            text="✨ 目前沒有待審批的自我進化提案 (Pending Proposals 為空)。" + broken_note,
-            reply_to_message_id=update.message.message_id if update.message else None,
-        )
-        return
-
-    lines = [f"📜 **待審批的自我進化提案 (共 {len(proposals)} 項)**\n"]
-    buttons = []
-
-    for p in proposals:
-        pid = p["id"]
-        ptype = p.get("proposal_type") or p.get("type", "policy")
-        summary = p.get("summary") or p.get("title", pid)
-        root_cause = p.get("root_cause") or p.get("reason", "無")
-        conf = p.get("confidence", 0.0)
-
-        icon = "🚨 Policy" if "policy" in ptype else "🛠️ Skill"
-        lines.append(
-            f"• **[{icon}] {summary}**\n"
-            f"  ID: `{pid}` | 置信度: `{conf:.2f}`\n"
-            f"  理由: {root_cause}\n"
-        )
-        buttons.append([
-            InlineKeyboardButton(f"✅ 批准 {pid}", callback_data=f"evo:app:{pid}"),
-            InlineKeyboardButton(f"❌ 駁回 {pid}", callback_data=f"evo:rej:{pid}"),
-        ])
-
-    lines.append("💡 點擊下方按鈕或使用 `/approve <id>` / `/reject <id>` 進行審核。")
-    if broken_note:
-        lines.append(broken_note)
-    kb = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text(
-        text="\n".join(lines),
-        reply_markup=kb,
-        reply_to_message_id=update.message.message_id if update.message else None,
-    )
-
-
-async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /approve <id> to approve a pending proposal."""
-    uid = update.effective_user.id
-    if not is_authorized(uid):
-        return
-
-    args = context.args or []
-    if not args:
-        await send_formatted_reply(
-            update=update,
-            context=context,
-            text="⚠️ 請指定欲批准的 Proposal ID，例如：`/approve pol_12345678`\n使用 `/proposals` 查看列表。",
-            reply_to_message_id=update.message.message_id if update.message else None,
-        )
-        return
-
-    pid = args[0].strip()
-    success, msg = approve_proposal(pid)
-    await send_formatted_reply(
-        update=update,
-        context=context,
-        text=msg,
-        reply_to_message_id=update.message.message_id if update.message else None,
-    )
-
-
-async def cmd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /reject <id> to reject a pending proposal."""
-    uid = update.effective_user.id
-    if not is_authorized(uid):
-        return
-
-    args = context.args or []
-    if not args:
-        await send_formatted_reply(
-            update=update,
-            context=context,
-            text="⚠️ 請指定欲駁回的 Proposal ID，例如：`/reject pol_12345678`\n使用 `/proposals` 查看列表。",
-            reply_to_message_id=update.message.message_id if update.message else None,
-        )
-        return
-
-    pid = args[0].strip()
-    success, msg = reject_proposal(pid)
-    await send_formatted_reply(
-        update=update,
-        context=context,
-        text=msg,
-        reply_to_message_id=update.message.message_id if update.message else None,
-    )
-
 
 # ---------------------------------------------------------------------------
 # Callback Query Handler (Interactive Buttons)
@@ -1431,15 +1320,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         ])
         await query.edit_message_text(text=overview, reply_markup=kb)
 
-    elif data.startswith("evo:app:"):
-        pid = data.split(":", 2)[2]
-        success, msg = approve_proposal(pid)
-        await query.edit_message_text(f"📝 **自我進化審批結果**\n\n{msg}")
 
-    elif data.startswith("evo:rej:"):
-        pid = data.split(":", 2)[2]
-        success, msg = reject_proposal(pid)
-        await query.edit_message_text(f"📝 **自我進化審批結果**\n\n{msg}")
+
+
 
     elif data == "noop":
         pass
@@ -1477,18 +1360,6 @@ async def post_init(app: Application) -> None:
         logger.warning("Failed to register bot commands: %s", e)
 
 
-    # Initialize Evolution Worker background daemon
-    try:
-        set_bot_instance(app.bot)
-        asyncio.create_task(start_evolution_worker())
-        # create_task only means "scheduled". The worker declines to run without
-        # an auxiliary API key, so announcing success here would contradict the
-        # warning it logs a moment later.
-        from evolution.worker import evaluator_available
-        if evaluator_available():
-            logger.info("🚀 Hermes-inspired Evolution Worker background loop scheduled")
-    except Exception as e:
-        logger.error("Failed to start Evolution Worker: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1547,9 +1418,6 @@ COMMAND_SPEC = [
     (["usage"],                cmd_usage,     "📊 查看 Token 用量與資源消耗統計"),
     (["model", "models"],      cmd_model,     "🧠 切換 AI 模型"),
     (["memory", "mem"],        cmd_memory,    "🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)"),
-    (["proposals"],            cmd_proposals, "📜 查看待審批的自我進化提案 (Policies / Skills)"),
-    (["approve"],              cmd_approve,   None),
-    (["reject"],               cmd_reject,    None),
     (["compact", "summarize"], cmd_compact,   "📦 壓縮當前會話上下文（瘦身並保留關鍵記憶）"),
     (["status"],               cmd_status,    "📈 查看系統狀態與當前會話"),
     (["reset", "new"],         cmd_reset,     "🔄 重置會話記憶（開啟新對話）"),

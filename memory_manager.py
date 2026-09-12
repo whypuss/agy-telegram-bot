@@ -307,10 +307,10 @@ def build_memory_context() -> str:
     memory_entries = read_entries("memory")
     session_entries = read_entries("sessions")
 
-    # Load active & pinned policies from evolution engine
+    # Standing behavioural rules, injected at the start of a conversation.
     active_policies = []
     try:
-        from evolution.lifecycle import get_active_policies, mark_policy_injected
+        from policy_store import get_active_policies, mark_policy_injected
         raw_policies = get_active_policies()
         for p in raw_policies:
             line = f"{p['summary']} (理由: {p.get('root_cause', '安全邊界')})"
