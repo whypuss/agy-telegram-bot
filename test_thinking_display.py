@@ -118,10 +118,43 @@ def test_status_card_thinking_injection():
     chunks = split_markdown_chunks(status_text)
     check("status card fits within single chunk", len(chunks) == 1 and utf16_len(chunks[0]) <= 4096)
 
+def test_extract_last_response():
+    print("=== Extract last response from transcript ===")
+    from agent_runner import _extract_last_response_from_transcript
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conv_id = "test-conv-uuid-response-999"
+        log_dir = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs")
+        os.makedirs(log_dir, exist_ok=True)
+        t_file = os.path.join(log_dir, "transcript_full.jsonl")
+        try:
+            lines = [
+                {"type": "USER_INPUT", "step_index": 0, "content": "hello turn 1"},
+                {"type": "PLANNER_RESPONSE", "step_index": 1, "content": "turn 1 answer"},
+                {"type": "USER_INPUT", "step_index": 2, "content": "hello turn 2"},
+                {"type": "PLANNER_RESPONSE", "step_index": 3, "tool_calls": [{"name": "run_command"}]},
+                {"type": "GENERIC", "step_index": 4, "content": "command output"},
+                {"type": "PLANNER_RESPONSE", "step_index": 5, "content": "這是最終真實答覆內容"},
+            ]
+            with open(t_file, "w", encoding="utf-8") as f:
+                for item in lines:
+                    f.write(json.dumps(item) + "\n")
+
+            resp = _extract_last_response_from_transcript(conv_id)
+            check("extracts latest turn final response", resp == "這是最終真實答覆內容")
+        finally:
+            if os.path.exists(t_file):
+                os.remove(t_file)
+            if os.path.exists(log_dir):
+                try:
+                    os.removedirs(log_dir)
+                except Exception:
+                    pass
+
 def main():
     test_extract_last_thinking()
     test_indicator_parsing()
     test_status_card_thinking_injection()
+    test_extract_last_response()
     passed = sum(_results)
     print(f"\n{passed}/{len(_results)} checks passed")
     return 0 if passed == len(_results) else 1

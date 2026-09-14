@@ -233,6 +233,11 @@ async def send_formatted_reply(
     if not text or not text.strip():
         return
 
+    # Safety: ensure raw NDJSON event dumps never leak into Telegram chat
+    if text.lstrip().startswith('{"event":'):
+        logger.error("send_formatted_reply intercepted raw NDJSON event output")
+        text = "⚠️ 任務已執行完畢，但標準輸出格式解析異常。請查看最新狀態或輸入指令繼續。"
+
     chat_id = update.effective_chat.id
     formatted_text = format_markdown_v2(text)
     chunks = split_markdown_chunks(formatted_text)
@@ -325,13 +330,14 @@ async def process_agent_turn(
     thread_id = getattr(update.message, "message_thread_id", None) if update.message else None
 
     current_model = get_user_model(uid)
+    model_code = current_model.replace('\\', '\\\\').replace('`', '\\`')
     backend_label = "💻 本地 OpenCode" if is_opencode_model(current_model) else "⚡ Antigravity"
 
     # Launch initial status message concurrently with agent startup (saves ~300-500ms startup RTT)
     status_msg_task = asyncio.create_task(
         context.bot.send_message(
             chat_id=chat.id,
-            text=f"⏳ *已接收請求，Agent 啟動中\\.\\.\\.*\n🔌 後端: {format_markdown_v2(backend_label)}\n📌 模型: `{format_markdown_v2(current_model)}`",
+            text=f"⏳ *已接收請求，Agent 啟動中\\.\\.\\.*\n🔌 後端: {format_markdown_v2(backend_label)}\n📌 模型: `{model_code}`",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_to_message_id=original_message_id,
             message_thread_id=thread_id,
@@ -410,7 +416,7 @@ async def process_agent_turn(
         msg_text = (
             f"⏳ *Agent 處理中\\.\\.\\.* \\({elapsed}\\)\n"
             f"🔌 後端: {format_markdown_v2(backend_label)}\n"
-            f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
+            f"📌 模型: `{model_code}`\n\n"
             f"📋 *執行過程：*\n"
             f"{format_markdown_v2(progress_block)}"
         )
@@ -544,7 +550,7 @@ async def process_agent_turn(
             final_status_text = (
                 f"✅ *任務完成* \\(耗時 {elapsed_total}{format_markdown_v2(token_str)}\\)\n"
                 f"🔌 後端: {format_markdown_v2(served_label)}\n"
-                f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
+                f"📌 模型: `{model_code}`\n\n"
                 f"📋 *執行過程：*\n"
                 f"{format_markdown_v2(completed_block)}"
             )

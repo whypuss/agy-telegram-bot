@@ -333,12 +333,15 @@ BOILERPLATE_PATTERNS = [
     r'檢查可用技能',
     r'檢查git狀態和差異',
     r'確保程式碼庫的整潔',
+    r'token-efficient',
+    r'memory-context',
+    r'working memory',
 ]
 
 
 def _clean_sentence_noise(text: str) -> str:
     """Filter out internal instructions and protocol boilerplate at sentence level."""
-    sentences = re.split(r'([。！？!?\n]+)', text)
+    sentences = re.split(r'([。！？!?\n]+|(?<=[a-zA-Z0-9])\.\s+)', text)
     out = []
     for i in range(0, len(sentences) - 1, 2):
         s = sentences[i].strip()
@@ -364,8 +367,7 @@ def _clean_and_dedup_thinking(raw_chunks: list[str]) -> Optional[str]:
     cleaned_chunks = []
     for c in raw_chunks:
         c_no_code = re.sub(r'```[\s\S]*?```', '', c).strip()
-        zh = _translate_thinking_to_zh_tw(c_no_code)
-        c_clean = _clean_sentence_noise(zh)
+        c_clean = _clean_sentence_noise(c_no_code)
         if c_clean and len(c_clean) >= 8:
             cleaned_chunks.append(c_clean)
 
@@ -387,7 +389,8 @@ def _clean_and_dedup_thinking(raw_chunks: list[str]) -> Optional[str]:
                     continue
                 seen_hashes.add(norm)
                 paras.append(p)
-        return "\n\n".join(paras) if paras else None
+        joined = "\n\n".join(paras) if paras else None
+        return _translate_thinking_to_zh_tw(joined) if joined else None
 
     # Multi-step runs (> 2 chunks): synthesize initial planning, substantive findings, and final conclusion
     initial_paras = [p.strip() for p in cleaned_chunks[0].split("\n\n") if len(p.strip()) >= 12]
@@ -402,7 +405,6 @@ def _clean_and_dedup_thinking(raw_chunks: list[str]) -> Optional[str]:
     for chunk in cleaned_chunks[1:-1]:
         for p in chunk.split("\n\n"):
             p = p.strip()
-            # Ignore short transition phrases like '需要檢查應用程式目錄...', '接著，確認專案目錄結構...'
             if len(p) < 40:
                 continue
             if re.search(r'^(?:需要|接著|下一步|準備)(?:檢查|查看|確認|探索|檢視)', p):
@@ -412,18 +414,41 @@ def _clean_and_dedup_thinking(raw_chunks: list[str]) -> Optional[str]:
             norm = re.sub(r'[^\w\u4e00-\u9fa5]', '', p.lower())[:30]
             if norm in seen_hashes:
                 continue
+
+            # Anti-repetition: filter semantic duplicate findings
+            words = set(re.findall(r'\w+', p.lower()))
+            is_dup = False
+            for existing in substantive_findings:
+                exist_words = set(re.findall(r'\w+', existing.lower()))
+                if words and exist_words:
+                    overlap = len(words & exist_words) / max(len(words), len(exist_words))
+                    if overlap > 0.65:
+                        is_dup = True
+                        break
+            if is_dup:
+                continue
+
             seen_hashes.add(norm)
             substantive_findings.append(p)
+            # Cap findings at 3 items to avoid repetitive thinking clutter
+            if len(substantive_findings) >= 3:
+                break
+        if len(substantive_findings) >= 3:
+            break
 
     sections = []
     if initial_paras:
-        sections.append("【需求分析與規劃】\n" + "\n".join(initial_paras))
+        sections.append("【需求分析與規劃】\n" + "\n".join(initial_paras[:2]))
     if substantive_findings:
         sections.append("【關鍵發現與進展】\n" + "\n".join(substantive_findings))
     if final_paras:
-        sections.append("【推演結論與行動】\n" + "\n".join(final_paras))
+        sections.append("【推演結論與行動】\n" + "\n".join(final_paras[:2]))
 
-    return "\n\n".join(sections) if sections else None
+    raw_synthesis = "\n\n".join(sections) if sections else None
+    if not raw_synthesis:
+        return None
+    # Fast single-shot translation on the synthesized text only
+    return _translate_thinking_to_zh_tw(raw_synthesis)
 
 
 def _extract_last_thinking(conv_id: Optional[str]) -> Optional[str]:
@@ -465,6 +490,47 @@ def _extract_last_thinking(conv_id: Optional[str]) -> Optional[str]:
 
 
 extract_last_thinking = _extract_last_thinking
+
+
+def _extract_last_response_from_transcript(conv_id: Optional[str]) -> Optional[str]:
+    """
+    Extract the final assistant response text from transcript_full.jsonl or transcript.jsonl
+    when stdout streaming was severed, aborted, or missed the result event.
+    """
+    if not conv_id:
+        return None
+    log_dir = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs")
+    target_file = os.path.join(log_dir, "transcript_full.jsonl")
+    if not os.path.exists(target_file):
+        target_file = os.path.join(log_dir, "transcript.jsonl")
+    if not os.path.exists(target_file):
+        return None
+
+    last_content = None
+    try:
+        with open(target_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    step = json.loads(line)
+                    st = step.get("type")
+                    if st == "USER_INPUT":
+                        last_content = None
+                    elif st == "PLANNER_RESPONSE" and step.get("content"):
+                        c = step["content"].strip()
+                        if c:
+                            last_content = c
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug("Failed reading transcript response: %s", e)
+
+    return last_content
+
+
+extract_last_response_from_transcript = _extract_last_response_from_transcript
 
 
 # ---------------------------------------------------------------------------
@@ -644,9 +710,9 @@ async def _run_agy_turn(
             return
 
         # Otherwise, process exited before result event (fallback / error case).
-        # Give streams up to 0.5s to flush remaining buffers for fallback parsing.
+        # Give streams up to 3.0s to flush remaining buffers for fallback parsing.
         try:
-            await asyncio.wait_for(asyncio.gather(stderr_task, stdout_task), timeout=0.5)
+            await asyncio.wait_for(asyncio.gather(stderr_task, stdout_task), timeout=3.0)
         except (asyncio.TimeoutError, Exception):
             pass
 
@@ -694,8 +760,7 @@ async def _run_agy_turn(
     else:
         # Fallback when the result event was missing. stdout is NDJSON, so
         # json.loads() over the whole buffer always fails once there is more
-        # than one line — which used to drop straight through to echoing the
-        # raw event stream at the user. Recover the result line by line first,
+        # than one line. Recover the result line by line first,
         # and if there is genuinely no result, salvage the streamed text_delta
         # fragments rather than dumping protocol noise.
         stdout_str = "\n".join(stdout_raw_lines).strip()
@@ -710,32 +775,35 @@ async def _run_agy_turn(
             if obj.get("event") == "result" and isinstance(obj.get("result"), dict):
                 recovered = obj["result"]
             elif obj.get("event") == "step_update":
-                frag = (obj.get("step_update") or {}).get("text_delta")
+                su = obj.get("step_update") or {}
+                frag = su.get("text_delta")
                 if frag:
                     deltas.append(frag)
+                elif su.get("step_type") == "agent_response" and su.get("content"):
+                    deltas.append(su["content"])
 
         if recovered:
             logger.warning("Recovered result event from raw stdout for user %s", user_id)
             stdout_str = json.dumps(recovered)
+            try:
+                parsed_json = json.loads(stdout_str)
+                if isinstance(parsed_json, dict):
+                    response_text = parsed_json.get("response", "").strip()
+                    new_conv_id = parsed_json.get("conversation_id")
+                    num_turns = parsed_json.get("num_turns", 1)
+                    duration = parsed_json.get("duration_seconds", 0.0)
+                    raw_usage = parsed_json.get("usage")
+                    result_data = parsed_json
+            except Exception:
+                pass
         elif deltas:
             logger.warning("No result event for user %s; reassembled %d streamed fragments",
                            user_id, len(deltas))
-            stdout_str = json.dumps({"response": "".join(deltas)})
-
-        try:
-            parsed_json = json.loads(stdout_str)
-            if isinstance(parsed_json, dict):
-                response_text = parsed_json.get("response", "").strip()
-                new_conv_id = parsed_json.get("conversation_id")
-                num_turns = parsed_json.get("num_turns", 1)
-                duration = parsed_json.get("duration_seconds", 0.0)
-                raw_usage = parsed_json.get("usage")
-                result_data = parsed_json
-            else:
-                response_text = stdout_str
-                raw_usage = None
-        except Exception:
-            response_text = stdout_str
+            response_text = "".join(deltas).strip()
+            raw_usage = None
+        else:
+            # Never fallback to dumping raw NDJSON event lines directly to user!
+            response_text = ""
             raw_usage = None
 
     if isinstance(raw_usage, dict):
@@ -826,11 +894,24 @@ async def _run_agy_turn(
     if target_conv_id:
         if new_conv_id:
             set_user_conversation(user_id, new_conv_id)
+        # Safety fallback: If response_text is missing or looks like raw protocol/NDJSON,
+        # recover the real response from the persisted session transcript on disk!
+        if not response_text or response_text.lstrip().startswith('{"event":'):
+            recovered_resp = _extract_last_response_from_transcript(target_conv_id)
+            if recovered_resp:
+                logger.info("Recovered response from transcript for user %s, conv %s", user_id, target_conv_id)
+                response_text = recovered_resp
+
         # Avoid duplicate display: only prepend to response_text if no status card callback is active
         if not on_progress and response_text and not response_text.startswith("❌"):
             th = _extract_last_thinking(target_conv_id)
             if th and "思考過程" not in response_text[:120]:
                 response_text = f"💭 **思考過程**：\n{th}\n\n---\n\n{response_text}"
+
+    # Guard: NEVER allow raw protocol NDJSON to leak as user-visible response text
+    if response_text and response_text.lstrip().startswith('{"event":'):
+        logger.error("Raw event stream was about to leak into response_text; suppressing it.")
+        response_text = ""
 
     # Persist session state to local disk immediately (crash/disconnect resilient)
     save_state()
