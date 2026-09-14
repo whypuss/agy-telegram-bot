@@ -69,6 +69,15 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
 - **Automatic Reconnection**: Automatically detects broken connections, hung loops, or DNS/network transitions, triggering a graceful service restart to restore communication.
 - **Unified Management CLI `agy-gateway`**: Complete operational command suite (`status`, `start`, `stop`, `restart`, `check`, `logs`), packaged with ready-to-use macOS LaunchAgent and Linux Systemd templates for persistent 24/7 background operation.
 
+### 11. 🧠 Unfolded Thinking Process & Structured CoT
+- **Full Traditional Chinese Reasoning**: Mandates agent Chain-of-Thought (thinking) to reason in Traditional Chinese for deep requirements analysis and architectural planning, backed by a realtime translation fallback.
+- **Zero Folding**: Completely eliminates collapsible quote blocks (`**>`) and HTML `<details>` elements. The thought process is displayed fully unfolded and flat on screen.
+- **Deduplicated 3-Section Synthesis**: Strips internal protocol boilerplate (e.g. task state updates, tool code artifacts) and redundant intent restatements, synthesizing multi-step reasoning into:
+  - 📋 **[Requirements & Planning]**: Initial goal analysis and architectural approach.
+  - 🔍 **[Key Findings & Discoveries]**: Concrete discoveries made during tool executions.
+  - 🎯 **[Conclusions & Next Actions]**: Final technical decisions guiding the response.
+- **Single Exposure (No Duplication)**: Elegantly presented inside the execution status card (expanded up to 1,500 chars) while keeping the final reply clean, eliminating redundant double-printing on the same screen.
+
 ---
 
 ## 📁 Repository Structure
@@ -339,6 +348,65 @@ treating the restart as done.
 land on the final observable behaviour — here, reading agy's own
 `brain/<conv_id>/.system_generated/logs/transcript_full.jsonl` to confirm the
 rule actually entered the prompt.
+
+### 11. macOS Full Disk Access silently rejects binaries & repeatedly prompts for Python permissions
+
+**Symptoms**: The user clicked "Allow" on permission popups, but the agent still triggered modal alerts (`Python 3.14 would like to access...`) on subsequent tasks (especially file searches or Python operations). Dragging `/opt/homebrew/bin/python3` or `python3.14` directly into macOS System Settings' Full Disk Access pane was **silently rejected with no entry added**.
+
+**Root Cause**:
+1. **Clicking popup "Allow" only grants single-folder access**: Popups add entries to "Files and Folders" (e.g. Desktop only). When the agent runs `find ~` and traverses into Photos, Calendars, Downloads, or Library, macOS fires **a brand new modal prompt for each independent privacy domain**.
+2. **macOS System Settings drag-and-drop only accepts `.app` bundles**: Homebrew's `bin/python3.14` is a bare Unix Mach-O executable. The GUI silently discards it. The true host bundle is **`Python.app`** (the actual running process is hosted by `.../Resources/Python.app/Contents/MacOS/Python`).
+3. **Broad home directory scans**: Running `find /Users/<user>` traverses into `~/Library` (Contacts, Mail, Messages), directly colliding with distinct TCC security boundaries.
+
+**Fix**:
+1. Add the real **`Python.app`** bundle into macOS **Full Disk Access**.
+2. Restrict agent search scope in `protocol.md` to prevent unbounded `find ~` scans, constraining searches to `~/projects/`.
+
+### 12. Multi-Step Agent Reasoning: Raw Concatenation Pollution
+
+**Symptoms**: The displayed thought process contained repeating introductory paragraphs ("Understanding user request..." repeated 3–4 times), polluted by internal bookkeeping notes (`task state needs updating`, `task_state.md`).
+
+**Root Cause**: In multi-step tool-execution turns, the LLM emits a micro-CoT before each tool call to self-align and prevent drift. Blindly joining raw chunks with `\n\n.join(chunks)` dumps the internal ReAct loop mechanics directly into the user's reading flow.
+
+**Fix**: Sentence-level boilerplate stripping (`_clean_sentence_noise`) and 3-section structured synthesis ([Requirements & Planning] + [Key Findings & Discoveries] + [Conclusions & Next Actions]), displayed once in the status card without redundant double-printing.
+
+---
+
+## 🍏 macOS Permission Setup Guide (Unattended 24/7 Execution)
+
+When running the Telegram Bot as a background daemon on macOS, agent operations involving file searches, code analysis, or Python automation will be intercepted by macOS TCC privacy prompts. If unattended, unresolved modal prompts cause tasks to stall or time out.
+
+> [!IMPORTANT]
+> **Key Traps**:
+> 1. **Do not rely on folder popups**: Clicking "Allow" only authorizes that specific folder. Once the agent searches near Photos, Downloads, or Calendars, macOS prompts again.
+> 2. **Do not drag the CLI binary `python3.14`**: System Settings silently rejects bare Mach-O executables. You must add the application bundle **`Python.app`**.
+
+### Permanent Setup Steps:
+
+#### Step 1: Grant Full Disk Access (FDA) [Crucial]
+Run these two commands in your Mac terminal:
+```bash
+# 1. Open the Full Disk Access settings pane directly
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+
+# 2. Highlight Python.app in Finder
+open -R /opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/Resources/Python.app
+```
+* **Action**: Drag the highlighted **`Python.app`** (blue/yellow Python icon) from the Finder window into the Full Disk Access list, and ensure the toggle is switched **ON (blue)**.
+* *(Alternatively, click the `+` icon at the bottom of the list, press `Cmd + Shift + G`, paste the path above, and click Open)*.
+
+#### Step 2: Enable Accessibility & Developer Tools (Optional)
+If executing window automation, mouse/keyboard simulation, or debugging:
+* System Settings -> Privacy & Security -> **Accessibility**: Add and enable `Python.app` and `Terminal`.
+* System Settings -> Privacy & Security -> **Developer Tools**: Enable `Terminal` and `Python`.
+
+#### Step 3: Passwordless Sudo (Optional for root maintenance)
+If allowing the bot to execute administrative commands without interactive password prompts:
+```bash
+echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/antigravity-nopasswd
+```
+
+Once configured, run `./restart.sh` to reload the daemon with full disk access active.
 
 ---
 

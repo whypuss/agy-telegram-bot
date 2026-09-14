@@ -69,6 +69,15 @@
 - **自動拉起與重連**：若發現網路重置或進程異常，守護程序會自動執行優雅重連與重啟，杜絕靜默斷線。
 - **專屬維運指令 `agy-gateway`**：整合 `status`、`start`、`stop`、`restart`、`check`、`logs`，並內建 macOS LaunchAgent 與 Linux Systemd 開機持久自啟服務模板。
 
+### 11. 🧠 直出完整繁中思考過程 (Unfolded Thinking & Clean CoT)
+- **全繁中思考推演**：規範 Agent 在底層思維空間（Chain of Thought）全程使用繁體中文進行深度需求拆解、架構決策與步驟推演，嚴禁英文思考，並內建即時翻譯兜底通道。
+- **直出不折疊 (Zero-Folding)**：徹底杜絕 Telegram 折疊引用塊（`**>`）或 HTML `<details>` 隱藏標籤，思考過程平鋪直接展開呈現，一目了然。
+- **去重與三段式結構化合成**：過濾內部系統 Prompt 機械套話（如 `task_state` 維護指示、工具程式碼雜訊）與多次重複的目標復述，將多步驟執行自動提煉為：
+  - 📋 **【需求分析與規劃】**：首步對用戶意圖的理解與架構方針。
+  - 🔍 **【關鍵發現與進展】**：在查閱工具/代碼過程中發現的客觀事實。
+  - 🎯 **【推演結論與行動】**：完成所有調查後的技術決策與回答導向。
+- **單一曝光無重複**：思考過程優雅呈現於執行狀態卡片中（上限放寬至 1500 字），下方回覆正文保持純淨回答，杜絕同屏雙重重複輸出。
+
 ---
 
 ## 📁 模組化專案架構
@@ -287,6 +296,65 @@ watchdog 的存活偵測也一樣：範圍太寬會讓一個**已死的 bot 看�
 本次除錯中犯過兩次：確認「protocol.md 載入了 357 tokens」就當規則生效（實際上使用者有既存對話，注入條件 `if not conv_id` 根本不成立，規則從未到達模型）；確認「指令 exit 0」就當重啟成功。
 
 **edit 成功不是行為正確的證據。** 驗證必須落在最終可觀察的行為上 —— 例如直接讀 agy 的 `brain/<conv_id>/.system_generated/logs/transcript_full.jsonl` 確認規則真的進了 prompt。
+
+### 11. macOS「完全取用磁碟」拖入二進制無反應，且反覆彈出 Python 授權
+
+**症狀**：使用者明明在彈窗中點了「允許」，但 Agent 每次執行新任務（特別是找檔案或 Python 任務）依舊狂跳 `Python 3.14 想要取用您的...` 彈窗；試圖將 `/opt/homebrew/bin/python3` 或 `python3.14` 拖入「完全取用磁碟」時，系統設定介面**毫無反應、靜默拒絕**。
+
+**真因**：
+1. **點擊彈窗「允許」只給單一目錄**：彈窗授權只會將應用加入「檔案與資料夾」（如僅限桌面）。一旦 Agent 執行 `find ~` 掃描到相簿（`Photos`）、行事曆（`Calendars`）、下載等系統保護區，macOS 就會為**每一個不同的隱私目錄獨立彈出新視窗**。
+2. **macOS 系統設定拖曳只接受 `.app` 套件**：Homebrew 的 `bin/python3.14` 是純 Unix Mach-O 二進制，System Settings 拒絕接收。必須加入真實的應用套件 **`Python.app`**（進程實際上正是由 `.../Resources/Python.app/Contents/MacOS/Python` 託管）。
+3. **Agent 全域掃描觸發防護**：Agent 從家目錄頂層執行 `find /Users/<user>` 會無差別深入 `~/Library` 的通訊錄、相片庫、訊息庫，直接撞上各類獨立 TCC 攔截。
+
+**修法**：
+1. 在「完全取用磁碟 (Full Disk Access)」中加入真實的 `Python.app`。
+2. 在 `protocol.md` 中增加目錄約束，嚴禁 `find ~`，強制將檔案檢索鎖定在 `~/projects/` 目錄內。
+
+### 12. 多步驟 Agent 思考過程的「全域拼接污染」
+
+**症狀**：Telegram 呈現的思考過程充斥重複開頭（「了解用戶要求...」重複三四遍），並夾帶大量 `task state needs updating`、`task_state.md` 等內部提示詞機械套話。
+
+**真因**：在多步驟工具調用回合中，模型每調用一次工具都會產出一段微型思考（Micro-CoT）。若簡單以 `\n\n.join(chunks)` 全域串聯，等於把模型在每一步 ReAct 迴圈中為了防遺忘而自我復述的目標與內部協議更新步驟全部暴露出來。
+
+**修法**：實作句子級內部套話過濾器（`_clean_sentence_noise`），並採三段式結構化合成（【需求分析與規劃】+【關鍵發現與進展】+【推演結論與行動】），過濾過渡碎屑並在同屏僅曝光一次。
+
+---
+
+## 🍏 macOS 權限配置指南（完全無人值守執行）
+
+Telegram Bot 作為後台守護進程運行時，Agent 在執行本機檔案檢索、代碼讀寫、或 Python 開發任務時，常被 macOS 系統級的安全防護（TCC 機制）彈窗攔截。人不在電腦前時，彈窗卡住會導致任務超時中斷。
+
+> [!IMPORTANT]
+> **常見授權陷阱**：
+> 1. **不要只在彈窗點「允許」**：彈窗只會授權單一資料夾（如桌面），一旦 Agent 搜尋到相簿、下載或日曆，macOS 又會彈出新視窗。
+> 2. **不要直接拖入終端執行檔 `python3.14`**：macOS 系統設定會靜默拒絕拖入的 Unix Executable 二進制檔，必須加入真正的應用套件 **`Python.app`**。
+
+### 永久授權步驟：
+
+#### 步驟 1：開啟「完全取用磁碟 (Full Disk Access)」【最核心】
+在 Mac 終端執行以下兩行命令：
+```bash
+# 1. 自動打開 Mac 的「完全取用磁碟」設定窗口
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+
+# 2. 自動在 Finder 中高亮定位 Python 3.14 的真實應用程式套件
+open -R /opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/Resources/Python.app
+```
+* **操作**：直接將彈出 Finder 視窗中高亮選中的 **`Python.app`**（帶有藍黃圖示）拖入打開的「完全取用磁碟」列表中，確認右側開關切換為**開啟（藍色）**。
+* *(亦可點擊列表下方的 `+` 號，按快捷鍵 `Cmd + Shift + G`，貼上上述路徑後點擊打開)*。
+
+#### 步驟 2：開啟「輔助功能」與「開發者工具」（選用）
+若任務涉及模擬點擊、視窗控制或未簽名二進制調試：
+* 「系統設定」->「隱私權與安全性」->「輔助功能 (Accessibility)」：將 `Python.app` 與 `Terminal` 加入並開啟。
+* 「系統設定」->「隱私權與安全性」->「開發者工具 (Developer Tools)」：開啟 `Terminal` 與 `Python`。
+
+#### 步驟 3：配置 `sudo` 免密碼（選用，針對 root 任務）
+若需允許 Bot 在後台自動執行管理員指令（如安裝全局套件、重載系統服務）：
+```bash
+echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/antigravity-nopasswd
+```
+
+完成上述設定後，執行 `./restart.sh` 重啟 Bot 服務，即可享有 100% 免確認的流暢自動化體驗。
 
 ---
 
