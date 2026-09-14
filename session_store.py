@@ -143,22 +143,21 @@ def get_user_model(user_id: int) -> str:
 
 
 def set_user_model(user_id: int, model_name: str) -> None:
-    """Set the model for a user WITHOUT wiping conversation memory.
+    """Set the model for a user.
 
-    Both backends' native sessions (agy conversation ID and OpenCode session
-    ID) are kept intact across model/backend switches so switching back
-    resumes the previous session. Context gaps created while the other
-    backend was active are bridged automatically by the rolling transcript
-    (see build_handoff_context), ensuring memory continuity when users
-    switch models due to quota exhaustion.
+    If switching agy models with different reasoning/thinking capabilities,
+    the native agy session must be refreshed because agy locks trajectory reasoning
+    effort at conversation creation. Context continuity is maintained via rolling transcripts
+    and memory injection.
     """
+    old_model = user_models.get(user_id)
     user_models[user_id] = model_name
-    # Remember OpenCode picks as the user's preferred OC model, so internal
-    # turns on the OC backend (e.g. cross-backend /compact summarization)
-    # reuse the last working OC model instead of the env default.
     from config import is_opencode_model
     if is_opencode_model(model_name):
         user_oc_models[user_id] = model_name
+    elif old_model != model_name:
+        user_conversations.pop(user_id, None)
+        user_agy_cumulative.pop(user_id, None)
     save_state()
 
 

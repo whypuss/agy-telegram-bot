@@ -197,6 +197,7 @@ async def run_opencode_turn(
     _oc_cancelled_users.discard(user_id)
 
     text_parts: List[str] = []
+    reasoning_parts: List[str] = []
     in_tokens = 0
     out_tokens = 0
     reasoning_tokens = 0
@@ -241,6 +242,10 @@ async def run_opencode_turn(
                             await on_progress("▶ 📝 正在生成回答... (OpenCode)")
                         except Exception:
                             pass
+            elif etype in ("reasoning", "thought", "thinking") and isinstance(part, dict):
+                r = part.get("text") or part.get("reasoning") or part.get("thought") or ""
+                if r:
+                    reasoning_parts.append(r)
             elif etype == "tool_use" and isinstance(part, dict):
                 indicator = _parse_tool_to_indicator(part.get("tool", ""), active=True)
                 if indicator and on_progress:
@@ -350,6 +355,10 @@ async def run_opencode_turn(
 
     duration = max(0.1, time.time() - start_time)
     response_text = "".join(text_parts).strip()
+    if reasoning_parts:
+        r_text = "".join(reasoning_parts).strip()
+        if r_text and "思考過程" not in response_text[:120]:
+            response_text = f"💭 **思考過程**：\n{r_text}\n\n---\n\n{response_text}"
 
     turn_usage: Optional[dict] = None
     total_tokens = in_tokens + out_tokens

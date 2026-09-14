@@ -1,42 +1,31 @@
-# Token-Efficient Agent Protocol
+# 繁體中文高效代理協定 (Token-Efficient Agent Protocol)
 
-## Output
-- Never print large command output.
-- Commands expected to exceed 50 lines MUST redirect to a file.
-- Inspect failures with grep, head, tail, or targeted reads.
-- Never print full git diff unless explicitly requested.
+## 輸出規範 (Output)
+- 嚴禁打印大型終端輸出。
+- 預期超過 50 行的指令必須重定向到檔案，使用 grep、head、tail 進行定向閱讀。
+- 除非使用者明確要求，否則不打印完整 git diff。
 
-## State
-- Maintain `~/.antigravity/task_state.md`.
-- Store discoveries, decisions, blockers and next steps there.
-- Do not repeat information already recorded there.
+## 狀態維護 (State)
+- 維護 `~/.antigravity/task_state.md`，記錄核心發現、決策、阻礙與下一步。
+- 不重複記錄已知資訊，專注實質進展。
 
-## Editing
-- Make surgical edits.
-- Never rewrite an entire file when a targeted patch is sufficient.
+## 程式碼編輯 (Editing)
+- 堅持精確修剪（Surgical Edits），能用局部補丁解決的絕不全檔重寫。
 
-## Verification
-- Run the smallest relevant test first.
-- On failure, capture output to a log and inspect only the relevant section.
-- Do not rerun unchanged expensive tests.
+## 驗證原則 (Verification)
+- 優先執行最小關聯測試。
+- 測試失敗時，重定向至日誌並僅檢查相關片段，不重複跑未變更的耗時測試。
+- 嚴禁因指令返回碼 0 或編輯成功就假設修改有效，必須驗證受影響的行為。
 
-## Checkpoints
-- Checkpoint on events, not on a tool-call count. A complete fix in two calls
-  is a checkpoint; ten calls still inside investigation is also a checkpoint.
-- Checkpoint boundaries: root cause confirmed, patch applied, targeted test
-  passed, evidence confirmed.
-- At each checkpoint update task_state.md and report only:
-  1. completed
-  2. current blocker
-  3. next action
+## Git 規範 (Git)
+- 變更前檢查 `git status --short`。
+- 詳細 diff 前優先查看 `git diff --stat`。
+- 保持提交語義連貫。
 
-## Git
-- Check `git status --short`.
-- Prefer `git diff --stat` before detailed diff.
-- Commit coherent milestones.
-
-## Evidence Discipline
-- Never assume a change worked because the edit succeeded.
-- Verify only the affected behavior.
-- Prefer exit code + concise evidence over full logs.
-- Record verified facts in task_state.md.
+## 思考與排版規範 (Thinking & Formatting Style)
+- **思維語言（Thinking Language）**：
+  思考過程（Thinking / Chain of Thought）必須**全程使用繁體中文**進行深度推理、用戶需求分析與步驟規劃，**嚴禁使用英文思考**！
+- **實質思考（Real Reasoning）**：
+  思考內容必須是實質的技術取捨、架構分析與方案推導，嚴禁輸出機械式模板套話、空代碼塊或重複前文。
+- **直出不折疊（Unfolded Display）**：
+  絕不使用可折疊引用塊（**>）或 HTML `<details>` 標籤，所有思考與推導必須以標準段落直出呈現，確保在 Telegram 中一目了然。

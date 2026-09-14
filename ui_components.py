@@ -343,6 +343,7 @@ def format_status_card(
     conv_display = f"`{conversation_id}`" if conversation_id else "*（尚未建立，傳送訊息將開啟）*"
     proxy_display = f"`{proxy_url}`" if proxy_url else "無代理 (Direct Connection)"
     backend_label = "💻 本地 OpenCode" if is_opencode_model(current_model) else "⚡ Antigravity"
+    fallback_display = "agy 異常時自動切換 💻 本地 OpenCode 備援"
     oc_sess_display = f"`{oc_session_id}`" if oc_session_id else "（無）"
 
     session = (usage_stats or {}).get("session") or {}

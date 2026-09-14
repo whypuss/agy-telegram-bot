@@ -132,6 +132,35 @@ async def _cancel_agy_task(user_id: int) -> bool:
 # Progress Parser Helper
 # ---------------------------------------------------------------------------
 
+def _get_step_thinking(conv_id: Optional[str], step_index: Optional[int]) -> Optional[str]:
+    """Retrieve the thinking text for a specific step from transcript files."""
+    if not conv_id:
+        return None
+    log_dir = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs")
+    target_file = os.path.join(log_dir, "transcript_full.jsonl")
+    if not os.path.exists(target_file):
+        target_file = os.path.join(log_dir, "transcript.jsonl")
+    if not os.path.exists(target_file):
+        return None
+    try:
+        with open(target_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    d = json.loads(line)
+                    if step_index is not None:
+                        if d.get("step_index") == step_index and d.get("thinking"):
+                            return d["thinking"].strip()
+                    elif d.get("thinking"):
+                        return d["thinking"].strip()
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug("Failed reading step thinking: %s", e)
+    return None
+
+
 def _parse_step_update_to_indicator(su: dict) -> Optional[str]:
     """Parse an agy stream-json step_update event into a user-friendly indicator string."""
     if not isinstance(su, dict):
@@ -200,10 +229,23 @@ def _parse_step_update_to_indicator(su: dict) -> Optional[str]:
         elif state == "DONE":
             dur = su.get("duration_seconds")
             dur_str = f" ({dur:.1f}s)" if (dur is not None and dur > 0.05) else ""
-            if su.get("text_delta"):
+            th_tok = (su.get("usage") or {}).get("thinking_tokens", 0)
+            if th_tok > 0:
+                conv_id = su.get("conversation_id")
+                step_idx = su.get("step_index")
+                th_text = _get_step_thinking(conv_id, step_idx)
+                if not th_text and conv_id:
+                    th_text = _extract_last_thinking(conv_id)
+                if th_text:
+                    th_clean = re.sub(r'```[\s\S]*?```', '', th_text).strip()
+                    if len(th_clean) > 300:
+                        th_clean = th_clean[:290] + "..."
+                    return f"✓ 🧠 思考過程{dur_str}：\n{th_clean}"
+                return f"✓ 🧠 深度思考完成{dur_str}"
+            elif su.get("text_delta"):
                 return f"✓ 📝 回答生成完畢{dur_str}"
             else:
-                return f"✓ 🧠 思考規劃完成{dur_str}"
+                return f"✓ 📋 步驟規劃完成{dur_str}"
 
     return None
 
@@ -234,6 +276,195 @@ def _parse_stderr_line_to_indicator(line: str) -> Optional[str]:
         return f"▸ {line_clean[:90]}"
 
     return None
+
+
+def _translate_thinking_to_zh_tw(text: str) -> str:
+    """Ensure thinking text is rendered in Traditional Chinese."""
+    if not text or not text.strip():
+        return text
+    # Check if text is predominantly English/Latin letters (>25% ascii alphabetic)
+    ascii_letters = sum(1 for c in text if c.isascii() and c.isalpha())
+    if ascii_letters / max(1, len(text)) < 0.25:
+        return text  # Already Chinese
+    try:
+        import httpx
+        import urllib.parse
+        chunks = text.split("\n\n")
+        translated_chunks = []
+        for chunk in chunks:
+            chunk_s = chunk.strip()
+            if not chunk_s:
+                continue
+            p_letters = sum(1 for c in chunk_s if c.isascii() and c.isalpha())
+            if p_letters / max(1, len(chunk_s)) < 0.25:
+                translated_chunks.append(chunk_s)
+                continue
+            encoded = urllib.parse.quote(chunk_s)
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-TW&dt=t&q={encoded}"
+            resp = httpx.get(url, timeout=3.5)
+            if resp.status_code == 200:
+                data = resp.json()
+                t_para = "".join(seg[0] for seg in data[0] if seg[0]).strip()
+                translated_chunks.append(t_para if t_para else chunk_s)
+            else:
+                translated_chunks.append(chunk_s)
+        return "\n\n".join(translated_chunks)
+    except Exception as e:
+        logger.debug("Failed translating thinking: %s", e)
+        return text
+
+
+BOILERPLATE_PATTERNS = [
+    r'task[_ ]state',
+    r'任務狀態',
+    r'專案狀態',
+    r'狀態檔',
+    r'指定文件',
+    r'操作守則',
+    r'系統說明和協議規範',
+    r'protocol specification',
+    r'system instruction',
+    r'程式碼修剪原則',
+    r'最小關聯測試',
+    r'tool code',
+    r'checkpoint',
+    r'不涉及假設',
+    r'依循指定',
+    r'檢查可用技能',
+    r'檢查git狀態和差異',
+    r'確保程式碼庫的整潔',
+]
+
+
+def _clean_sentence_noise(text: str) -> str:
+    """Filter out internal instructions and protocol boilerplate at sentence level."""
+    sentences = re.split(r'([。！？!?\n]+)', text)
+    out = []
+    for i in range(0, len(sentences) - 1, 2):
+        s = sentences[i].strip()
+        sep = sentences[i + 1]
+        if not s:
+            continue
+        s_lower = s.lower()
+        if any(re.search(pat, s_lower) for pat in BOILERPLATE_PATTERNS):
+            continue
+        out.append(s + sep)
+    if len(sentences) % 2 == 1 and sentences[-1].strip():
+        s = sentences[-1].strip()
+        if not any(re.search(pat, s.lower()) for pat in BOILERPLATE_PATTERNS):
+            out.append(s)
+    return "".join(out).strip()
+
+
+def _clean_and_dedup_thinking(raw_chunks: list[str]) -> Optional[str]:
+    """Clean boilerplate noise, deduplicate repeated steps, and synthesize true thinking."""
+    if not raw_chunks:
+        return None
+
+    cleaned_chunks = []
+    for c in raw_chunks:
+        c_no_code = re.sub(r'```[\s\S]*?```', '', c).strip()
+        zh = _translate_thinking_to_zh_tw(c_no_code)
+        c_clean = _clean_sentence_noise(zh)
+        if c_clean and len(c_clean) >= 8:
+            cleaned_chunks.append(c_clean)
+
+    if not cleaned_chunks:
+        return None
+
+    # Single or two-step runs: return clean paragraphs directly
+    if len(cleaned_chunks) <= 2:
+        seen_hashes = set()
+        paras = []
+        for c in cleaned_chunks:
+            for p in c.split("\n\n"):
+                p = p.strip()
+                if not p:
+                    continue
+                p_sub = re.sub(r'^(?:Initial assessment|初步評估|Approach)[:：]\s*', '', p, flags=re.IGNORECASE)
+                norm = re.sub(r'[^\w\u4e00-\u9fa5]', '', p_sub.lower())[:40]
+                if norm in seen_hashes:
+                    continue
+                seen_hashes.add(norm)
+                paras.append(p)
+        return "\n\n".join(paras) if paras else None
+
+    # Multi-step runs (> 2 chunks): synthesize initial planning, substantive findings, and final conclusion
+    initial_paras = [p.strip() for p in cleaned_chunks[0].split("\n\n") if len(p.strip()) >= 12]
+    final_paras = [p.strip() for p in cleaned_chunks[-1].split("\n\n") if len(p.strip()) >= 12]
+
+    substantive_findings = []
+    seen_hashes = set()
+    for p in initial_paras + final_paras:
+        norm = re.sub(r'[^\w\u4e00-\u9fa5]', '', p.lower())[:30]
+        seen_hashes.add(norm)
+
+    for chunk in cleaned_chunks[1:-1]:
+        for p in chunk.split("\n\n"):
+            p = p.strip()
+            # Ignore short transition phrases like '需要檢查應用程式目錄...', '接著，確認專案目錄結構...'
+            if len(p) < 40:
+                continue
+            if re.search(r'^(?:需要|接著|下一步|準備)(?:檢查|查看|確認|探索|檢視)', p):
+                continue
+            if re.search(r'^(?:了解|確認|分析)?(?:用戶|使用者)(?:要求|詢問|希望|需要|提問)', p):
+                continue
+            norm = re.sub(r'[^\w\u4e00-\u9fa5]', '', p.lower())[:30]
+            if norm in seen_hashes:
+                continue
+            seen_hashes.add(norm)
+            substantive_findings.append(p)
+
+    sections = []
+    if initial_paras:
+        sections.append("【需求分析與規劃】\n" + "\n".join(initial_paras))
+    if substantive_findings:
+        sections.append("【關鍵發現與進展】\n" + "\n".join(substantive_findings))
+    if final_paras:
+        sections.append("【推演結論與行動】\n" + "\n".join(final_paras))
+
+    return "\n\n".join(sections) if sections else None
+
+
+def _extract_last_thinking(conv_id: Optional[str]) -> Optional[str]:
+    """
+    Extract the thinking/reasoning chain from the latest turn of an agy session
+    so it can be displayed directly in Telegram unfolded and in Traditional Chinese.
+    """
+    if not conv_id:
+        return None
+    log_dir = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs")
+    target_file = os.path.join(log_dir, "transcript_full.jsonl")
+    if not os.path.exists(target_file):
+        target_file = os.path.join(log_dir, "transcript.jsonl")
+    if not os.path.exists(target_file):
+        return None
+
+    current_turn_thinking: list[str] = []
+    try:
+        with open(target_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    step = json.loads(line)
+                    st = step.get("type")
+                    if st == "USER_INPUT":
+                        current_turn_thinking.clear()
+                    elif st == "PLANNER_RESPONSE" and step.get("thinking"):
+                        t = step["thinking"].strip()
+                        if t:
+                            current_turn_thinking.append(t)
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug("Failed reading transcript thinking: %s", e)
+
+    return _clean_and_dedup_thinking(current_turn_thinking)
+
+
+extract_last_thinking = _extract_last_thinking
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +503,9 @@ async def _run_agy_turn(
         # stays byte-identical across the rest of the conversation.
         if AGENT_SYSTEM_PROMPT:
             effective_prompt = f"[系統指示: {AGENT_SYSTEM_PROMPT}]\n{effective_prompt}"
+    else:
+        # On subsequent turns, reinforce thinking and response language
+        effective_prompt = f"[語言規範：思考過程（thinking）與回覆必須全程使用繁體中文進行實質推理。]\n{prompt}"
 
     # Cross-backend handoff: if the user recently chatted on the other backend
     # (e.g. switched model after quota exhaustion), inject those missed turns
@@ -588,8 +822,15 @@ async def _run_agy_turn(
                     new_conv_id = match.group(0)
                     break
 
-    if new_conv_id:
-        set_user_conversation(user_id, new_conv_id)
+    target_conv_id = new_conv_id or conv_id
+    if target_conv_id:
+        if new_conv_id:
+            set_user_conversation(user_id, new_conv_id)
+        # Avoid duplicate display: only prepend to response_text if no status card callback is active
+        if not on_progress and response_text and not response_text.startswith("❌"):
+            th = _extract_last_thinking(target_conv_id)
+            if th and "思考過程" not in response_text[:120]:
+                response_text = f"💭 **思考過程**：\n{th}\n\n---\n\n{response_text}"
 
     # Persist session state to local disk immediately (crash/disconnect resilient)
     save_state()

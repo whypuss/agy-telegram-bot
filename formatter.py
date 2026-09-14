@@ -203,6 +203,22 @@ def format_markdown_v2(content: str) -> str:
 
     text = content
 
+    # 0a) Unfold <think> / <thought> tags into direct plain text
+    text = re.sub(
+        r'<(?:think|thought)>(.*?)</(?:think|thought)>',
+        lambda m: f"\n\n💭 **思考過程**：\n{m.group(1).strip()}\n\n---\n\n" if m.group(1).strip() else "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    # 0b) Unfold HTML <details> collapsible blocks into direct plain text
+    text = re.sub(
+        r'<details>(?:\s*<summary>(.*?)</summary>)?(.*?)</details>',
+        lambda m: f"\n\n💭 **{(m.group(1) or '詳細內容').strip()}**：\n{m.group(2).strip()}\n\n---\n\n",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
     # 0) Convert GFM tables to mobile-friendly rows
     text = _wrap_markdown_tables(text)
 
@@ -274,12 +290,12 @@ def format_markdown_v2(content: str) -> str:
         text,
     )
 
-    # 9) Convert blockquotes (> quote or **> expandable quote)
+    # 9) Convert blockquotes (> quote). Never produce **> (expandable quote) to avoid folding
     def _convert_blockquote(m):
-        prefix = m.group(1)
+        prefix = m.group(1).replace('**', '')
         content_str = m.group(2)
-        if prefix.startswith('**') and content_str.endswith('||'):
-            return _ph(f'{prefix} {escape_mdv2(content_str[:-2])}||')
+        if content_str.endswith('||'):
+            content_str = content_str[:-2]
         return _ph(f'{prefix} {escape_mdv2(content_str)}')
 
     text = re.sub(

@@ -73,6 +73,7 @@ from agent_runner import (
     get_last_backend,
     is_user_task_running,
     cancel_user_task,
+    extract_last_thinking,
 )
 from session_store import (
     get_user_oc_session,
@@ -171,6 +172,52 @@ async def _record_correction(update: Update, uid: int, text: str) -> None:
 # ---------------------------------------------------------------------------
 # Message Sending with Fallback
 # ---------------------------------------------------------------------------
+
+async def reply_card(message, text: str, reply_markup=None):
+    """Reply with a Markdown card (bold/code markers), MarkdownV2 with plain fallback."""
+    try:
+        return await message.reply_text(
+            text=format_markdown_v2(text),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    except BadRequest as e:
+        logger.warning("reply_card MarkdownV2 failed (%s), falling back to plain text", e)
+        return await message.reply_text(
+            text=strip_markdown_v2(text),
+            reply_markup=reply_markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+
+
+async def edit_card(query, text: str, reply_markup=None):
+    """Edit a message with a Markdown card, MarkdownV2 with plain fallback.
+
+    "message is not modified" is not an error — the card is already current.
+    """
+    try:
+        return await query.edit_message_text(
+            text=format_markdown_v2(text),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup,
+        )
+    except BadRequest as e:
+        if "not modified" in str(e).lower():
+            return None
+        logger.warning("edit_card MarkdownV2 failed (%s), falling back to plain text", e)
+        try:
+            return await query.edit_message_text(
+                text=strip_markdown_v2(text),
+                reply_markup=reply_markup,
+            )
+        except Exception as e2:
+            logger.warning("edit_card plain fallback failed: %s", e2)
+            return None
+    except Exception as e:
+        logger.warning("edit_card failed: %s", e)
+        return None
+
 
 async def send_formatted_reply(
     update: Update,
@@ -314,6 +361,81 @@ async def process_agent_turn(
 
     typing_task = asyncio.create_task(_typing_heartbeat())
 
+    async def _edit_status_card(msg_text: str, plain_text: str) -> None:
+        """Edit the status card, falling back to plain text; never fails silently."""
+        try:
+            status_msg = await status_msg_task
+            await status_msg.edit_text(
+                text=msg_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=build_cancel_keyboard(),
+            )
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+            logger.warning("Status card MarkdownV2 edit failed (%s), falling back to plain text", e)
+            try:
+                status_msg = await status_msg_task
+                await status_msg.edit_text(
+                    text=plain_text,
+                    reply_markup=build_cancel_keyboard(),
+                )
+            except Exception as e2:
+                logger.warning("Status card plain-text edit failed: %s", e2)
+        except Exception as e:
+            logger.warning("Status card edit failed: %s", e)
+
+    async def _push_status(force: bool = False) -> None:
+        """Push the current progress block to the status card (rate-limited).
+
+        force=True is used by the periodic refresher: it fires even when no new
+        agent events arrived, so the elapsed timer keeps ticking during silent
+        phases and the user can see the task is still alive.
+        """
+        now = time.time()
+        progress_block = "\n".join(progress_items)
+        content_changed = (progress_block != last_progress_block[0])
+        time_elapsed = (now - last_status_update[0] >= 1.5)
+        heartbeat_elapsed = (now - last_status_update[0] >= 5.0)
+
+        if force:
+            if not heartbeat_elapsed:
+                return
+        elif not ((content_changed and time_elapsed) or heartbeat_elapsed):
+            return
+
+        last_status_update[0] = now
+        last_progress_block[0] = progress_block
+        elapsed = format_elapsed(int(now - start_time))
+        msg_text = (
+            f"⏳ *Agent 處理中\\.\\.\\.* \\({elapsed}\\)\n"
+            f"🔌 後端: {format_markdown_v2(backend_label)}\n"
+            f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
+            f"📋 *執行過程：*\n"
+            f"{format_markdown_v2(progress_block)}"
+        )
+        plain_text = (
+            f"⏳ Agent 處理中... ({elapsed})\n"
+            f"🔌 後端: {backend_label}\n"
+            f"📌 模型: {current_model}\n\n"
+            f"📋 執行過程：\n{progress_block}"
+        )
+        await _edit_status_card(msg_text, plain_text)
+
+    async def _status_refresher():
+        # Agent events only arrive when steps change; during long silent
+        # thinking/generation phases nothing would update the card at all.
+        while True:
+            await asyncio.sleep(5.0)
+            try:
+                await _push_status(force=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("Status refresher failed: %s", e)
+
+    refresher_task = asyncio.create_task(_status_refresher())
+
     # Progress line callback
     async def on_progress(indicator: str):
         # In-place replacement: if previous item was active and new indicator completes it, update in-place
@@ -327,44 +449,11 @@ async def process_agent_turn(
         while len(progress_items) > 8:
             progress_items.pop(0)
 
-        now = time.time()
-        progress_block = "\n".join(progress_items)
-        content_changed = (progress_block != last_progress_block[0])
-        time_elapsed = (now - last_status_update[0] >= 1.5)
-        heartbeat_elapsed = (now - last_status_update[0] >= 5.0)
-
-        # Rate limit status edits: only edit when content changes (min 1.5s) or periodic 5s heartbeat
-        if (content_changed and time_elapsed) or heartbeat_elapsed:
-            last_status_update[0] = now
-            last_progress_block[0] = progress_block
-            elapsed = format_elapsed(int(now - start_time))
-            msg_text = (
-                f"⏳ *Agent 處理中\\.\\.\\.* \\({elapsed}\\)\n"
-                f"🔌 後端: {format_markdown_v2(backend_label)}\n"
-                f"📌 模型: `{format_markdown_v2(current_model)}`\n\n"
-                f"📋 *執行過程：*\n"
-                f"{format_markdown_v2(progress_block)}"
-            )
-            try:
-                status_msg = await status_msg_task
-                await status_msg.edit_text(
-                    text=msg_text,
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=build_cancel_keyboard(),
-                )
-            except Exception:
-                # Fallback to plain text on Markdown edit error
-                try:
-                    status_msg = await status_msg_task
-                    await status_msg.edit_text(
-                        text=f"⏳ Agent 處理中... ({elapsed})\n🔌 後端: {backend_label}\n📌 模型: {current_model}\n\n📋 執行過程：\n{progress_block}",
-                        reply_markup=build_cancel_keyboard(),
-                    )
-                except Exception:
-                    pass
+        await _push_status()
 
     # Run agent execution
     cancelled_by_correction = False
+    new_conv_id: Optional[str] = None
     try:
         reply_text, new_conv_id, turn_usage = await run_agent_turn(
             prompt=prompt,
@@ -385,6 +474,7 @@ async def process_agent_turn(
     finally:
         typing_active = False
         typing_task.cancel()
+        refresher_task.cancel()
 
     if cancelled_by_correction:
         # Turn was interrupted by an incoming correction — skip the final
@@ -418,6 +508,36 @@ async def process_agent_turn(
                 final_items.append(it.replace("▶ ", "✓ "))
             else:
                 final_items.append(it)
+
+        # Enrich execution trace with actual thinking process if thinking occurred
+        target_cid = new_conv_id or get_user_conversation(uid)
+        if target_cid:
+            th_card = extract_last_thinking(target_cid)
+            if th_card:
+                clean_th = re.sub(r'```[\s\S]*?```', '', th_card).strip()
+                # Status card fits up to ~1500 chars comfortably within Telegram's 4096 limit
+                if len(clean_th) > 1500:
+                    clean_th = clean_th[:1490] + "..."
+                
+                thinking_injected = False
+                for idx, it in enumerate(final_items):
+                    if "🧠" in it or "思考" in it or "步驟規劃" in it:
+                        if not thinking_injected:
+                            dur_match = re.search(r'\(\d+\.?\d*s\)', it)
+                            dur_suffix = f" {dur_match.group(0)}" if dur_match else ""
+                            final_items[idx] = f"✓ 🧠 思考過程{dur_suffix}：\n{clean_th}"
+                            thinking_injected = True
+                        else:
+                            final_items[idx] = ""
+                final_items = [item for item in final_items if item]
+                if not thinking_injected:
+                    final_items.insert(0, f"✓ 🧠 思考過程：\n{clean_th}")
+            else:
+                for idx, it in enumerate(final_items):
+                    if "深度思考完成" in it:
+                        dur_match = re.search(r'\(\d+\.?\d*s\)', it)
+                        dur_suffix = f" {dur_match.group(0)}" if dur_match else ""
+                        final_items[idx] = f"✓ 📋 步驟規劃完成{dur_suffix}"
 
         if final_items:
             completed_block = "\n".join(final_items)
@@ -470,16 +590,21 @@ async def process_agent_turn(
                         parse_mode=ParseMode.MARKDOWN_V2,
                         reply_markup=None,
                     )
-                except Exception:
+                except BadRequest as e:
+                    if "not modified" in str(e).lower():
+                        return
+                    logger.warning("Final status card MarkdownV2 edit failed (%s), falling back to plain text", e)
                     try:
                         await status_msg.edit_text(
                             text=plain_final_text,
                             reply_markup=None,
                         )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    except Exception as e2:
+                        logger.warning("Final status card plain-text edit failed: %s", e2)
+                except Exception as e:
+                    logger.warning("Final status card edit failed: %s", e)
+            except Exception as e:
+                logger.warning("Final status card update aborted: %s", e)
 
         status_finish_task = asyncio.create_task(_finish_status_card())
 
@@ -949,11 +1074,24 @@ async def cmd_compact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     status_msg = await update.message.reply_text("📦 正在啟動上下文壓縮 (Context Compression)...")
 
+    _compact_last = {"text": "", "ts": 0.0}
+
     async def on_progress(text: str):
+        # Compact turns stream one event per text fragment; editing with an
+        # unchanged text earns a Telegram 400 ("message is not modified") and
+        # unthrottled edits flood the API, so dedupe and rate-limit here.
+        now = time.time()
+        if text == _compact_last["text"] or now - _compact_last["ts"] < 2.0:
+            return
+        _compact_last["text"] = text
+        _compact_last["ts"] = now
         try:
             await status_msg.edit_text(text)
-        except Exception:
-            pass
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                logger.warning("compact status edit failed: %s", e)
+        except Exception as e:
+            logger.warning("compact status edit failed: %s", e)
 
     start_time = time.time()
     success, result_text, old_tok, new_tok = await compact_user_conversation(
@@ -1236,10 +1374,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         [InlineKeyboardButton("❌ 關閉", callback_data="view_mem:close")]
     ])
 
-    await update.message.reply_text(
-        text=overview,
-        reply_markup=kb,
-    )
+    await reply_card(update.message, overview, kb)
 
 
 
@@ -1310,11 +1445,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if len(text) > 3800:
             text = text[:3700] + "\n\n...（其餘條目請於本地檔案查看）"
 
-        await query.edit_message_text(
-            text=text,
+        await edit_card(
+            query,
+            text,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 返回總覽", callback_data="view_mem_overview")]
-            ])
+            ]),
         )
 
     elif data == "view_mem_overview":
@@ -1337,7 +1473,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             ],
             [InlineKeyboardButton("❌ 關閉", callback_data="view_mem:close")]
         ])
-        await query.edit_message_text(text=overview, reply_markup=kb)
+        await edit_card(query, overview, kb)
 
 
 
