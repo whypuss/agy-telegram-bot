@@ -5,6 +5,10 @@
 - 預期超過 50 行的指令必須重定向到檔案，使用 grep、head、tail 進行定向閱讀。
 - 除非使用者明確要求，否則不打印完整 git diff。
 
+## 目錄與搜尋規範 (Directory & Search Scope)
+- 嚴禁從家目錄頂層執行無差別全域深度搜尋（嚴禁 `find /Users/whypuss` 或 `find ~`），避免遍歷觸碰系統受保護目錄（如 Library、相簿、日曆等）而觸發 macOS 系統隱私彈窗。
+- 搜尋專案或代碼時，必須優先精確鎖定在 `~/projects/` 或目標專案子目錄內搜尋。
+
 ## 狀態維護 (State)
 - 維護 `~/.antigravity/task_state.md`，記錄核心發現、決策、阻礙與下一步。
 - 不重複記錄已知資訊，專注實質進展。
