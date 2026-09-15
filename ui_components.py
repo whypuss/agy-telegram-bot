@@ -51,6 +51,7 @@ OPENCODE_MODELS: List[dict] = [
     {"id": "sensenova/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "較強推理"},
     {"id": "sensenova/sensenova-u1-fast", "name": "SenseNova U1 Fast", "desc": "日日新 U1 (圖文/生成)"},
     {"id": "sensenova/sensenova-u1.5-lite", "name": "SenseNova U1.5 Lite", "desc": "日日新 U1.5 輕量版"},
+    {"id": "sensenova/sensenova-6.8-flash-lite", "name": "SenseNova 6.8 Flash Lite", "desc": "日日新 6.8 輕量對話"},
     {"id": "opencode/muse-spark-1.3-contributor-free", "name": "Muse Spark 1.3", "desc": "免費額度"},
     {"id": "opencode/muse-spark-1.2-contributor-free", "name": "Muse Spark 1.2", "desc": "免費額度"},
     {"id": "opencode/nemotron-3-ultra-free", "name": "Nemotron 3 Ultra Free", "desc": "免費大型模型"},
@@ -124,6 +125,9 @@ def resolve_model_alias(model_query: str) -> str:
         if "1.5" in q_clean or "lite" in q_clean:
             return "sensenova/sensenova-u1.5-lite"
         return "sensenova/sensenova-u1-fast"
+
+    if "6.8" in q_clean or "68" in q_clean.replace(" ", ""):
+        return "sensenova/sensenova-6.8-flash-lite"
 
     if "cliproxy" in q_clean:
         return "cliproxy/sensenova-fast"
