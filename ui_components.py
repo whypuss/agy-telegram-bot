@@ -49,6 +49,8 @@ PAGE_SIZE = 6
 OPENCODE_MODELS: List[dict] = [
     {"id": "sensenova/deepseek-v4-flash", "name": "DeepSeek V4 Flash", "desc": "極速回覆 (預設備援)"},
     {"id": "sensenova/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "較強推理"},
+    {"id": "sensenova/sensenova-u1-fast", "name": "SenseNova U1 Fast", "desc": "日日新 U1 (圖文/生成)"},
+    {"id": "sensenova/sensenova-u1.5-lite", "name": "SenseNova U1.5 Lite", "desc": "日日新 U1.5 輕量版"},
     {"id": "opencode/muse-spark-1.3-contributor-free", "name": "Muse Spark 1.3", "desc": "免費額度"},
     {"id": "opencode/muse-spark-1.2-contributor-free", "name": "Muse Spark 1.2", "desc": "免費額度"},
     {"id": "opencode/nemotron-3-ultra-free", "name": "Nemotron 3 Ultra Free", "desc": "免費大型模型"},
@@ -117,6 +119,11 @@ def resolve_model_alias(model_query: str) -> str:
 
     if "ollama" in q_clean or "gemma" in q_clean:
         return "ollama/gemma4-e2b-uncensored"
+
+    if "u1" in q_clean or "日日新" in query or "sensenova u" in q_clean:
+        if "1.5" in q_clean or "lite" in q_clean:
+            return "sensenova/sensenova-u1.5-lite"
+        return "sensenova/sensenova-u1-fast"
 
     if "cliproxy" in q_clean:
         return "cliproxy/sensenova-fast"
