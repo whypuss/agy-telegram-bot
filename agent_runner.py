@@ -533,6 +533,49 @@ def _extract_last_response_from_transcript(conv_id: Optional[str]) -> Optional[s
 extract_last_response_from_transcript = _extract_last_response_from_transcript
 
 
+def _extract_emergency_summary_from_disk(user_id: int, conv_id: Optional[str]) -> Optional[str]:
+    """
+    Emergency fallback when live model turn fails (e.g. context overflow on 10M+ tokens).
+    Synthesizes a structured summary from task_state.md, recent transcript, and SESSIONS.md on disk.
+    """
+    parts = []
+
+    # 1. Project & Task State
+    task_state_path = Path.home() / ".antigravity" / "task_state.md"
+    if task_state_path.exists():
+        try:
+            ts = task_state_path.read_text(encoding="utf-8").strip()
+            if ts:
+                parts.append(f"### 📋 當前項目與任務狀態 (task_state.md)\n{ts[:2500]}")
+        except Exception as e:
+            logger.debug("Failed reading task_state.md: %s", e)
+
+    # 2. Last Completed Response from Transcript
+    last_resp = _extract_last_response_from_transcript(conv_id)
+    if last_resp:
+        parts.append(f"### ✅ 最近一輪執行產出與結論\n{last_resp[:2000]}")
+
+    # 3. Previous Session Context if available
+    try:
+        from memory_manager import read_entries
+        sessions = read_entries("sessions")
+        if sessions:
+            last_sess = sessions[-1].strip()
+            if last_sess:
+                parts.append(f"### 🔍 前次會話重點備忘\n{last_sess[:1500]}")
+    except Exception:
+        pass
+
+    if not parts:
+        return None
+
+    return (
+        "【系統自動應急提煉之上下文記憶】\n"
+        "（註：原會話因累積龐大 Token 或上下文飽和無法執行在線總結，已自動透過本機磁碟快照萃取核心狀態）\n\n"
+        + "\n\n".join(parts)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core Execution Engine
 # ---------------------------------------------------------------------------
@@ -1121,7 +1164,14 @@ async def compact_user_conversation(
         )
 
     if not summary_reply or summary_reply.startswith("❌"):
-        return False, f"提煉對話記憶失敗：\n{summary_reply}", old_tokens, 0
+        logger.warning("Live summary turn failed for user %s; attempting disk emergency extraction", user_id)
+        fallback_summary = _extract_emergency_summary_from_disk(user_id, agy_conv or oc_sess)
+        if fallback_summary:
+            summary_reply = fallback_summary
+            if on_progress:
+                await on_progress("⚠️ 在線提煉超限，已自動透過磁碟快照應急提煉記憶...")
+        else:
+            return False, f"提煉對話記憶失敗：\n{summary_reply}", old_tokens, 0
 
     # Capture peak usage after summary turn completes
     current_session = user_session_usage.get(user_id, {})

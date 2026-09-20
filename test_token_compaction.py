@@ -175,12 +175,44 @@ async def test_compact_mocked():
         check("new_tokens is non-zero", new_tok == 14000, f"got {new_tok}")
 
 
+async def test_compact_emergency_fallback():
+    print("=== Compact conversation emergency fallback on 10M+ tokens context overflow ===")
+    uid = 99906
+    user_conversations[uid] = "saturated-conv-10m"
+    user_session_usage[uid] = {"total_tokens": 10500000, "input_tokens": 10400000, "output_tokens": 100000, "num_turns": 50}
+    user_agy_cumulative[uid] = {"total_tokens": 10500000, "input_tokens": 10400000, "output_tokens": 100000}
+
+    async def mock_seed_turn(prompt, user_id, on_progress=None):
+        user_session_usage[user_id] = {
+            "input_tokens": 5000,
+            "output_tokens": 100,
+            "thinking_tokens": 50,
+            "total_tokens": 5100,
+            "num_turns": 1,
+        }
+        return "✅ 已成功載入前續記憶與項目狀態，請指示下一步工作。", "fresh-seeded-conv", {"total_tokens": 5100}
+
+    # Simulate live model failing due to massive context saturation
+    with patch("agent_runner._run_agy_turn", new=AsyncMock(return_value=("❌ 執行失敗：Context Saturation (>10M tokens)", None, None))), \
+         patch("agent_runner._extract_emergency_summary_from_disk", return_value="### 📋 應急快照\n從磁碟提取的核心記憶"), \
+         patch("agent_runner.run_agent_turn", side_effect=mock_seed_turn), \
+         patch("memory_manager.add_session_summary"):
+
+        success, summary, old_tok, new_tok = await compact_user_conversation(uid)
+
+        check("compact succeeded via emergency disk fallback", success is True)
+        check("old_tokens reflects saturated session", old_tok >= 10500000, f"got {old_tok}")
+        check("new_tokens resets to lightweight session", new_tok == 5100, f"got {new_tok}")
+        check("old saturated conversation cleared", uid not in user_conversations)
+
+
 def main():
     test_baseline_cleared_on_reset()
     test_clear_agy_cumulative()
     test_self_healing_baseline()
     test_state_persistence()
     asyncio.run(test_compact_mocked())
+    asyncio.run(test_compact_emergency_fallback())
 
     print()
     if all(_results):
