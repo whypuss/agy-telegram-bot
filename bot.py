@@ -81,6 +81,7 @@ from session_store import (
     reset_user_oc_session,
     clear_transcript,
 )
+from learner import execute_learn_turn
 from ui_components import (
     AVAILABLE_MODELS,
     build_model_keyboard,
@@ -457,6 +458,18 @@ async def process_agent_turn(
 
         await _push_status()
 
+    async def on_learn_notify(notice_text: str):
+        try:
+            await send_formatted_reply(
+                update=update,
+                context=context,
+                text=notice_text,
+                reply_to_message_id=original_message_id,
+                thread_id=thread_id,
+            )
+        except Exception as ne:
+            logger.warning("Failed to send auto-learn notification: %s", ne)
+
     # Run agent execution
     cancelled_by_correction = False
     new_conv_id: Optional[str] = None
@@ -465,6 +478,7 @@ async def process_agent_turn(
             prompt=prompt,
             user_id=uid,
             on_progress=on_progress,
+            on_learn_notify=on_learn_notify,
         )
     except asyncio.CancelledError:
         cancelled_by_correction = _has_pending_corrections(uid)
@@ -1383,6 +1397,66 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await reply_card(update.message, overview, kb)
 
 
+async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /learn command to review conversation history and persist rules/memories."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    if is_user_task_running(uid):
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text="⚠️ 目前有任務正在運行中，請稍候或先發送 /cancel 中止任務後再進行學習提煉。",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    # Extract optional user note following /learn (e.g. /learn 部署前必須先測試連線)
+    text = (update.message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    user_note = parts[1].strip() if len(parts) > 1 else ""
+
+    status_msg = await update.message.reply_text("🧠 正在啟動 Antigravity /learn 深度學習與規則提煉...")
+
+    _learn_last = {"text": "", "ts": 0.0}
+
+    async def on_progress(indicator: str):
+        now = time.time()
+        if indicator == _learn_last["text"] or now - _learn_last["ts"] < 2.0:
+            return
+        _learn_last["text"] = indicator
+        _learn_last["ts"] = now
+        try:
+            await status_msg.edit_text(indicator)
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                logger.warning("learn status edit failed: %s", e)
+        except Exception as e:
+            logger.warning("learn status edit failed: %s", e)
+
+    start_time = time.time()
+    success, card_text, stats = await execute_learn_turn(
+        user_id=uid,
+        user_note=user_note,
+        on_progress=on_progress,
+    )
+    elapsed = int(time.time() - start_time)
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=f"{card_text}\n*(耗時 {elapsed}s)*",
+        reply_to_message_id=update.message.message_id,
+    )
+
+
+
 
 # ---------------------------------------------------------------------------
 # Callback Query Handler (Interactive Buttons)
@@ -1570,22 +1644,47 @@ def main() -> None:
     )
 
 
+# Import Antigravity Workflow & Reasoning Commands
+from workflow_commands import (
+    cmd_skills,
+    cmd_plan,
+    cmd_grill,
+    cmd_goal,
+    cmd_boost,
+    cmd_teamwork,
+    cmd_btw,
+    cmd_browser,
+    cmd_diff,
+    cmd_schedule,
+)
+
 # Single source of truth for commands: (aliases, handler, menu description).
 # Handler registration and the Telegram menu are both generated from this, so a
 # command cannot appear in the UI without a handler behind it, or vice versa.
 # A None description means the command works but stays out of the menu.
 COMMAND_SPEC = [
-    (["start"],                cmd_start,     None),
-    (["usage"],                cmd_usage,     "📊 查看 Token 用量與資源消耗統計"),
-    (["model", "models"],      cmd_model,     "🧠 切換 AI 模型"),
-    (["memory", "mem"],        cmd_memory,    "🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)"),
-    (["compact", "summarize"], cmd_compact,   "📦 壓縮當前會話上下文（瘦身並保留關鍵記憶）"),
-    (["status"],               cmd_status,    "📈 查看系統狀態與當前會話"),
-    (["reset", "new"],         cmd_reset,     "🔄 重置會話記憶（開啟新對話）"),
-    (["cancel", "stop"],       cmd_cancel,    "🛑 中止正在運行的任務"),
-    (["steer"],                cmd_steer,     None),
-    (["clear"],                cmd_clear,     "🧹 清理暫存多模態檔案"),
-    (["help"],                 cmd_help,      "📖 顯示說明手冊"),
+    (["start"],                                cmd_start,     None),
+    (["usage"],                                cmd_usage,     "📊 查看 Token 用量與資源消耗統計"),
+    (["model", "models"],                      cmd_model,     "🧠 切換 AI 模型"),
+    (["memory", "mem"],                        cmd_memory,    "🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)"),
+    (["learn"],                                cmd_learn,     "🎓 檢視近期對話並學習提煉規則與記憶 (Antigravity Learn)"),
+    (["compact", "summarize"],                 cmd_compact,   "📦 壓縮當前會話上下文（瘦身並保留關鍵記憶）"),
+    (["status"],                               cmd_status,    "📈 查看系統狀態與當前會話"),
+    (["reset", "new"],                         cmd_reset,     "🔄 重置會話記憶（開啟新對話）"),
+    (["cancel", "stop"],                       cmd_cancel,    "🛑 中止正在運行的任務"),
+    (["steer"],                                cmd_steer,     None),
+    (["clear"],                                cmd_clear,     "🧹 清理暫存多模態檔案"),
+    (["skills", "skill"],                      cmd_skills,    "🧩 瀏覽與檢視 Agent 技能庫 (Skills)"),
+    (["plan"],                                 cmd_plan,      "📋 生成架構實作規劃工件（審閱後才動手改代碼）"),
+    (["grill", "grill_me", "grillme"],         cmd_grill,     "🥩 深度盤點需求與排查極端邊界情況 (Grill-me)"),
+    (["goal"],                                 cmd_goal,      "🎯 持續自主攻堅與除錯直到終端目標達成"),
+    (["boost"],                                cmd_boost,     "🚀 啟動高強度深度推理攻克棘手 Bug 或演算法"),
+    (["teamwork", "teamwork_preview"],         cmd_teamwork,  "👥 調度多 Agent 協同團隊並行推進大規模任務"),
+    (["btw"],                                  cmd_btw,       "💬 背景獨立插問（不污染主任務會話記憶）"),
+    (["browser", "browse"],                    cmd_browser,   "🌐 啟動聯網檢索與網頁內容/UI 驗證"),
+    (["diff"],                                 cmd_diff,      "🔍 零 Token 即時檢視工作目錄代碼變更 (Git Diff)"),
+    (["schedule"],                             cmd_schedule,  "⏱️ 設定倒數計時提醒或定時背景任務"),
+    (["help"],                                 cmd_help,      "📖 顯示說明手冊"),
 ]
 
 

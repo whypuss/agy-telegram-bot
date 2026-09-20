@@ -12,6 +12,7 @@ putting them in the prompt.
 """
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Tuple
 
@@ -81,3 +82,71 @@ def set_policy_status(policy_id: str, status: str) -> Tuple[bool, str]:
     p_path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("Policy %s: %s -> %s", policy_id, was, status)
     return True, f"✅ `{policy_id}`: `{was}` → `{status}`"
+
+
+def save_policy(
+    policy_id: str,
+    summary: str,
+    root_cause: str = "",
+    trigger: str = "",
+    constraint: str = "",
+    verification: str = "",
+    evidence: str = "",
+) -> Tuple[bool, str]:
+    """Save or update a hardline policy file in POLICIES_DIR.
+
+    Normalizes policy_id (prefix with 'rule_', lowercase, valid characters).
+    """
+    clean_id = policy_id.strip().lower()
+    clean_id = re.sub(r'[^a-z0-9_-]', '_', clean_id)
+    if not clean_id.startswith("rule_"):
+        clean_id = f"rule_{clean_id}"
+    clean_id = re.sub(r'_+', '_', clean_id).strip('_')
+
+    if not summary.strip():
+        return False, "❌ 規則摘要 (summary) 不可為空。"
+
+    POLICIES_DIR.mkdir(parents=True, exist_ok=True)
+    p_path = POLICIES_DIR / f"{clean_id}.json"
+    now = int(time.time())
+
+    existing = {}
+    if p_path.exists():
+        try:
+            existing = json.loads(p_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    record = {
+        "id": clean_id,
+        "summary": summary.strip(),
+        "root_cause": root_cause.strip() or existing.get("root_cause", "安全邊界與行為約束"),
+        "evidence": evidence.strip() or existing.get("evidence", "Derived from /learn"),
+        "version": existing.get("version", 0) + 1,
+        "created_at": existing.get("created_at", now),
+        "last_updated": now,
+        "status": "active",
+    }
+    if trigger.strip():
+        record["trigger"] = trigger.strip()
+    elif "trigger" in existing:
+        record["trigger"] = existing["trigger"]
+
+    if constraint.strip():
+        record["constraint"] = constraint.strip()
+    elif "constraint" in existing:
+        record["constraint"] = existing["constraint"]
+
+    if verification.strip():
+        record["verification"] = verification.strip()
+    elif "verification" in existing:
+        record["verification"] = existing["verification"]
+
+    try:
+        p_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("Saved policy %s: %s", clean_id, summary[:60])
+        return True, f"✅ 已成功儲存規則 `{clean_id}`"
+    except Exception as e:
+        logger.error("Failed saving policy %s: %s", clean_id, e)
+        return False, f"❌ 儲存規則失敗: {e}"
+

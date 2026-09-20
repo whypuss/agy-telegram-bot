@@ -134,6 +134,7 @@ async def run_opencode_turn(
     user_id: int,
     model: Optional[str] = None,
     on_progress: Optional[Callable[[str], Coroutine]] = None,
+    on_learn_notify: Optional[Callable[[str], Coroutine]] = None,
     _retried: bool = False,
 ) -> Tuple[str, Optional[str], Optional[dict]]:
     """
@@ -441,6 +442,8 @@ async def run_opencode_turn(
     if response_text and not response_text.startswith("❌"):
         try:
             asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
+            from learner import auto_learn_from_turn
+            auto_learn_from_turn(user_id, prompt, response_text, notify_callback=on_learn_notify)
         except Exception:
             pass
         # Record into the rolling cross-backend transcript for handoff

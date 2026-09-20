@@ -9,7 +9,7 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}{(' — ' + detail) if detail and not cond else ''}")
 
 
-EXPECTED = ["usage", "model", "memory", "compact", "status", "reset", "cancel", "clear", "help"]
+EXPECTED = ["usage", "model", "memory", "learn", "compact", "status", "reset", "cancel", "clear", "help"]
 REMOVED = {"pin", "unpin", "proposals", "approve", "reject"}
 
 

@@ -541,6 +541,7 @@ async def _run_agy_turn(
     prompt: str,
     user_id: int,
     on_progress: Optional[Callable[[str], Coroutine]] = None,
+    on_learn_notify: Optional[Callable[[str], Coroutine]] = None,
 ) -> Tuple[str, Optional[str], Optional[dict]]:
     """
     Execute a turn of the Antigravity Agent for a user (agy backend only).
@@ -963,12 +964,14 @@ async def _run_agy_turn(
         else:
             response_text = "（Agent 回覆為空）"
 
-    # Background memory extraction from the completed turn
+    # Background memory extraction and continuous auto-learning from the completed turn
     if response_text and not response_text.startswith("❌"):
         try:
             asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
+            from learner import auto_learn_from_turn
+            auto_learn_from_turn(user_id, prompt, response_text, notify_callback=on_learn_notify)
         except Exception as e:
-            logger.error("Memory extraction not scheduled for this turn: %s: %s",
+            logger.error("Memory extraction or auto-learning not scheduled for this turn: %s: %s",
                          type(e).__name__, e)
         # Record into the rolling cross-backend transcript for handoff
         append_transcript(user_id, "user", "agy", prompt)
@@ -981,6 +984,7 @@ async def run_agent_turn(
     prompt: str,
     user_id: int,
     on_progress: Optional[Callable[[str], Coroutine]] = None,
+    on_learn_notify: Optional[Callable[[str], Coroutine]] = None,
 ) -> Tuple[str, Optional[str], Optional[dict]]:
     """
     Execute a turn, routing to agy or local OpenCode by the user's model.
@@ -1001,6 +1005,7 @@ async def run_agent_turn(
             user_id=user_id,
             model=model,
             on_progress=on_progress,
+            on_learn_notify=on_learn_notify,
         )
 
     try:
@@ -1008,6 +1013,7 @@ async def run_agent_turn(
             prompt=prompt,
             user_id=user_id,
             on_progress=on_progress,
+            on_learn_notify=on_learn_notify,
         )
     except asyncio.CancelledError:
         raise
