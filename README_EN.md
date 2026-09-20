@@ -78,29 +78,62 @@ Re-architected with inspiration from [NousResearch Hermes Agent](https://github.
   - 🎯 **[Conclusions & Next Actions]**: Final technical decisions guiding the response.
 - **Single Exposure (No Duplication)**: Elegantly presented inside the execution status card (expanded up to 1,500 chars) while keeping the final reply clean, eliminating redundant double-printing on the same screen.
 
+### 12. 🧩 Native Antigravity Workflow & Reasoning Suite (`workflow_commands.py`)
+- **Planning & Requirements Analysis**:
+  - `/plan <requirement>`: Generates an Implementation Plan artifact analyzing current codebase state, architectural choices, step-by-step roadmap, and verification invariants before modifying any code.
+  - `/grill-me` (alias `/grill`): Activates Architecture Interviewer mode, asking 3-5 critical edge-case probing questions before implementation.
+- **Autonomous Goals & Deep Reasoning**:
+  - `/goal <target>`: Autonomous perseverance mode, running and self-debugging until the final objective is 100% completed without bothering the user at every step.
+  - `/boost <task>`: Enables deep thinking loop specifically targeted at race conditions, tricky bugs, and complex algorithms.
+  - `/teamwork <task>`: Launches a collaborative multi-agent squad suited for repository-wide refactors and long-running tasks.
+- **Tooling & Skill Management**:
+  - `/skills [name]`: Scans and parses builtin, global, and workspace Agent Skills (`SKILL.md` frontmatter) with browsing and detailed inspect views.
+  - `/btw <question>`: Side-channel question asked in the background without blocking the primary task.
+  - `/browser <url/task>`: Dispatches a sandboxed browser agent for live web research or UI rendering verification.
+  - `/diff`: Instantly views uncommitted Git workspace diffs and statistics.
+  - `/schedule <time> <cmd>`: Sets one-shot countdown timers or background recurring schedules.
+
+### 13. 🎓 `/learn` Reflection & Dual-Track Continuous Auto-Learning (`learner.py`)
+- **Antigravity Native `/learn` Protocol**: Analyzes recent turns, user corrections, and breakthroughs for root-cause synthesis.
+- **Tri-State Memory Persistence**:
+  - 🛡️ **Hardline Rule / Policy**: Compiled into `policies/*.json` and injected as top-priority constraints into subsequent sessions.
+  - 👤 **User Preference**: Appended to `USER.md` to sync naming conventions and communication habits.
+  - 🖥️ **System Fact**: Appended to `MEMORY.md` to store server endpoints, ports, and environment specs.
+- **Dual-Track Autonomous Evolution**:
+  - **Track 1 (Instant Fallback)**: Fast regex detector captures user correction signals on task completion.
+  - **Track 2 (Deep Background Reviewer)**: Non-blocking asynchronous Reviewer LLM analyzes failure-to-success deltas and compiles structured policies.
+
+### 14. 🛡️ Autonomous Completion Guard & Lifecycle Recovery
+- **Eliminate "Async Hallucination"**: Forbids future-tense promises (e.g. "I will complete this later in background") that cause the agent to stop calling tools and terminate the CLI early. Mandates continuous tool execution to full completion in the active turn.
+- **Prevent Self-Kill Restarts**: Forbids the agent from executing `restart.sh` or `kickstart` mid-turn, preventing severed parent-child IPC pipes.
+- **Watchdog Busy Lock**: Watchdog checks `is_agent_active()` and active task marker to prevent killing long-running agent tasks.
+- **Crash & Interruption Recovery Alert**: Bot detects orphaned tasks upon startup after system reboots or crashes, instantly pushing an alert card with task preview to Telegram.
+
 ---
 
 ## 📁 Repository Structure
 
 ```
 tg-antigravity-bot/
-├── bot.py             # Main entry point, Telegram update router & turn pipeline
-├── config.py          # Environment settings, authentication checks & defaults
-├── memory_manager.py  # Local dual-store persistent memory (USER.md / MEMORY.md) & listener
-├── session_store.py   # Crash-resilient state persistence engine (atomic JSON serialization)
-├── formatter.py       # MarkdownV2 converter, GFM table wrapper & code-aware chunking
-├── agent_runner.py    # agy CLI subprocess management, stderr streaming & task cancellation
-├── opencode_runner.py # Local OpenCode backend: NDJSON streaming, session persistence & fallback
-├── media_handler.py   # Inbound media download cache & outbound media detection
-├── ui_components.py   # Model selector inline keyboards, status & help formatters
-├── policy_store.py    # Reads and injects standing rules (hand-written; no pipeline)
-├── watchdog.py        # 60s guard: liveness, alive-but-broken detection, verified restart
-├── test_*.py          # Acceptance matrices (injection, command menu, stream limit, restart)
-├── requirements.txt   # Python package dependencies
-├── .env.example       # Configuration template
-├── README.md          # Traditional Chinese documentation
-├── README_EN.md       # English documentation
-└── LICENSE            # MIT License
+├── bot.py                  # Main entry point, Telegram update router & turn pipeline
+├── config.py               # Environment settings, authentication checks & defaults
+├── memory_manager.py       # Local dual-store persistent memory (USER.md / MEMORY.md) & listener
+├── session_store.py        # Crash-resilient state persistence engine (atomic JSON serialization)
+├── formatter.py            # MarkdownV2 converter, GFM table wrapper & code-aware chunking
+├── agent_runner.py         # agy CLI subprocess management, stderr streaming & task cancellation
+├── opencode_runner.py      # Local OpenCode backend: NDJSON streaming, session persistence & fallback
+├── workflow_commands.py    # Native workflow & reasoning suite (/plan, /goal, /skills, etc.)
+├── learner.py              # Antigravity /learn protocol & dual-track continuous learning engine
+├── media_handler.py        # Inbound media download cache & outbound media detection
+├── ui_components.py        # Model selector inline keyboards, status & help formatters
+├── policy_store.py         # Reads and injects standing rules (hand-written and /learn-compiled)
+├── watchdog.py             # 60s guard: liveness, active-task busy lock & verified restart
+├── test_*.py               # Acceptance test suite (9 test suites, 130+ tests 100% passing)
+├── requirements.txt        # Python package dependencies
+├── .env.example            # Configuration template
+├── README.md               # Traditional Chinese documentation
+├── README_EN.md            # English documentation
+└── LICENSE                 # MIT License
 ```
 
 ---
@@ -160,19 +193,36 @@ python bot.py
 
 ## 📖 Commands
 
+### 🕹️ Core Session & Control
 | Command | Description |
 |---|---|
 | `/start` | Welcome screen, view User ID and quick start guide |
 | `/usage` | 📊 View session, turn, and total token usage statistics |
-| `/model` | Open interactive button menu to switch AI models with pagination |
+| `/model` | Open interactive button menu to switch AI models with pagination (including local OpenCode models) |
 | `/memory` or `/mem` | 🧠 View, search, and manage local persistent memories (`USER.md` / `MEMORY.md`) |
 | `/compact` | 📦 Compact current conversation history while preserving key decisions |
-| `/reset` or `/new` | Reset conversation memory and start a fresh session |
-| `/status` | View agent health, token usage, active model, session ID, workspace, and uptime |
-| `/cancel` or `/stop` | Abort a long-running agent turn immediately |
-| `/steer <text>` | Abort the current task, discard accumulated corrections, and restart with a new instruction |
-| `/clear` | Purge local temporary media cache files |
-| `/help` | Display comprehensive command and feature guide |
+| `/reset` or `/new` | 🔄 Reset conversation memory and start a fresh session |
+| `/status` | 📈 View agent health, token usage, active model, session ID, workspace, and uptime |
+| `/cancel` or `/stop` | 🛑 Abort a long-running agent turn immediately |
+| `/steer <text>` | 🔄 Abort the current task, discard accumulated corrections, and restart with a new instruction |
+| `/clear` | 🧹 Purge local temporary media cache files |
+| `/help` | ❓ Display comprehensive categorized command and feature guide |
+
+### 🧩 Native Antigravity Workflow & Reasoning Commands
+| Command | Description |
+|---|---|
+| `/learn [topic]` | 🎓 Run Antigravity `<LEARN>` protocol to analyze recent turns and extract Policy/User/Memory rules |
+| `/skills [name]` | 🧩 Scan workspace and global Agent Skills (`SKILL.md` frontmatter); browse list or view details |
+| `/plan <requirement>` | 📋 Generate an Implementation Plan artifact analyzing state, steps, and verification before modifying code |
+| `/grill-me <requirement>` (alias `/grill`) | 🥩 Architecture Interviewer mode, asking 3-5 critical edge-case questions before implementation |
+| `/goal <target>` | 🎯 Autonomous goal-driven execution loop that self-debugs until the target is 100% completed |
+| `/boost <task>` | 🚀 Enable deep thinking loop tailored for race conditions, subtle bugs, and complex algorithms |
+| `/teamwork <task>` | 👥 Dispatch a collaborative multi-agent squad for repository-wide refactoring and long tasks |
+| `/btw <question>` | 💡 Side-channel question asked in the background without blocking the primary task |
+| `/browser <url/task>` | 🌐 Dispatch a sandboxed browser agent for live web data scraping, UI inspection, or verification |
+| `/diff` | 📝 Instantly view uncommitted Git workspace diffs and statistics (`git diff`) |
+| `/schedule <time> <cmd>` | ⏰ Schedule a one-shot countdown timer (e.g. `10m`, `1h`) or background recurring task |
+
 
 ---
 
@@ -369,6 +419,25 @@ rule actually entered the prompt.
 **Root Cause**: In multi-step tool-execution turns, the LLM emits a micro-CoT before each tool call to self-align and prevent drift. Blindly joining raw chunks with `\n\n.join(chunks)` dumps the internal ReAct loop mechanics directly into the user's reading flow.
 
 **Fix**: Sentence-level boilerplate stripping (`_clean_sentence_noise`) and 3-section structured synthesis ([Requirements & Planning] + [Key Findings & Discoveries] + [Conclusions & Next Actions]), displayed once in the status card without redundant double-printing.
+
+### 13. Mid-Task Self-Kill Restart Severing Active Connections
+
+**Symptoms**: When instructing the agent to modify bot code (e.g. `bot.py`), execution abruptly froze with no reply in Telegram. When asking "Why did it stop?", the LLM hallucinated that "the service reload triggered a tool timeout protection".
+
+**Root Cause**: The agent proactively executed `restart.sh`, `launchctl kickstart`, or `pkill -f bot.py` mid-task to apply changes. Since the active `agy` subprocess was spawned by the parent bot process, the parent receiving a SIGTERM instantly destroyed all child processes and severed streaming IPC pipes without returning output.
+
+**Fix**:
+1. Explicitly forbid mid-task self restarts in `protocol.md`.
+2. Add `is_agent_active()` check in `watchdog.py` to suppress restarts during active tasks.
+3. Track active tasks in `bot.py` via an atomic state file; upon startup after unexpected restarts, proactively send an interruption alert card to Telegram so the user is never left hanging.
+
+### 14. Agent "Async Hallucination": Promising Future Completion While Terminating the CLI
+
+**Symptoms**: The agent confidently reported "I will proceed with testing in the background..." or "I will run step 2 later...", but then nothing ever happened and the task was abandoned.
+
+**Root Cause**: The Telegram Bot invokes the agent in CLI single-turn mode (`agy --print`). When the model emits text containing future-tense promises without issuing another tool call, the CLI determines the turn is complete and exits (Exit 0). There is no daemon or persistent timer behind the scenes to resume execution.
+
+**Fix**: Inject an ironclad Autonomous Completion Invariant into `protocol.md` and `agent_runner.py` turn prompts: strictly forbid future-tense promises and mandate continuous tool execution within the active turn until 100% verified.
 
 ---
 

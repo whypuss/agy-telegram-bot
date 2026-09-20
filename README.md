@@ -78,27 +78,60 @@
   - 🎯 **【推演結論與行動】**：完成所有調查後的技術決策與回答導向。
 - **單一曝光無重複**：思考過程優雅呈現於執行狀態卡片中（上限放寬至 1500 字），下方回覆正文保持純淨回答，杜絕同屏雙重重複輸出。
 
+### 12. 🧩 Antigravity 原生工作流程與深度推理指令集 (`workflow_commands.py`)
+- **架構規劃與規格釐清**：
+  - `/plan <需求>`：生成架構實作方案工件（Implementation Plan），分析現狀、拆解步驟、技術選型與驗證標準，審閱確認前不改動代碼。
+  - `/grill-me` (別名 `/grill`)：進入架構面試官模式，主動提出關鍵問題，深度審查極端邊界情況（Edge Cases）與技術約束。
+- **自主目標與深度推理**：
+  - `/goal <目標>`：給定終端目標後自主攻堅、反覆除錯與驗證，中途不打擾使用者，直到目標 100% 達成。
+  - `/boost <任務>`：啟動深度思考循環，專攻競態條件、疑難 Bug 與高難度演算法。
+  - `/teamwork <任務>`：啟動多 Agent 協同團隊，適用於跨儲存庫遷移、大規模重構與長週期任務。
+- **外圍工具與技能庫**：
+  - `/skills [名稱]`：自動掃描並解析內建、全域與專案級 Skills（`SKILL.md` frontmatter），支援瀏覽或檢視特定技能詳情。
+  - `/btw <問題>`：在不阻塞主任務進度的情況下，在背景插問獨立問題。
+  - `/browser <網址/任務>`：調用沙盒化瀏覽器 Agent 進行網頁資料爬取或 UI 排版檢查。
+  - `/diff`：即時查看當前專案 Git 工作區修改與變更摘要。
+  - `/schedule <時間> <指令>`：排程一次性倒數計時器或背景定時任務。
+
+### 13. 🎓 `/learn` 經驗提煉與雙軌持續自動學習 (`learner.py`)
+- **Antigravity 原生 `/learn` 協議**：主動審視對話歷史中的指正、錯誤與突破，自動進行深層根因推導。
+- **三態知識分流持久化**：
+  - 🛡️ **硬性行為守則 (Hardline Rule / Policy)**：自動落地為 `policies/*.json`，在後續新會話作為最高優先級硬約束注入。
+  - 👤 **使用者個人偏好 (User Preference)**：寫入 `USER.md`，即時同步溝通習慣與命名喜好。
+  - 🖥️ **系統環境事實 (System Fact)**：寫入 `MEMORY.md`，沉澱伺服器 IP、埠號等技術規格。
+- **雙軌無感自動學習**：
+  - **軌道一（快速保底）**：每輪任務結束後正則攔截指正信號，即刻記錄使用者偏好。
+  - **軌道二（深度背景 Reviewer）**：非阻塞啟動 Reviewer 模型，對指正進行根因分析並編譯為結構化守則。
+
+### 14. 🛡️ 自主閉環鐵律與防假死中斷守護 (Autonomous Completion Guard & Recovery)
+- **杜絕「非同步假死」**：嚴禁 Agent 在回覆中宣稱「稍後自動做」或「正在背景運行」而停止調用工具。明確約束單次回合必須自主連續調用工具執行到底，直到全流程 100% 驗證通過。
+- **防止「自我重啟自殺」**：嚴禁 Agent 在對話任務執行中途調用 `kickstart` 或 `restart.sh`，避免自斷進程管道。
+- **Watchdog 忙碌守護鎖**：在長任務執行期間，Watchdog 偵測到活動進程自動掛起守護重啟，徹底防止長任務被誤殺。
+- **異常重啟主動告警**：若進程遭遇外部強制中斷或機器重啟，Bot 重啟後第一時間在 Telegram 主動發送告警卡片，通知使用者上次任務中斷並附帶任務摘要，絕不讓使用者乾等。
+
 ---
 
 ## 📁 模組化專案架構
 
 ```
 tg-antigravity-bot/
-├── bot.py             # 核心應用程式入口、Telegram Update 路由與批次調度
-├── config.py          # 環境變數載入、設定解析與權限校驗
-├── memory_manager.py  # 本機持久記憶雙軌庫 (USER.md/MEMORY.md)、持續監聽與快照注入
-├── session_store.py   # 會話與進程抗掉線持久化狀態儲存庫 (JSON 磁碟原子寫入)
-├── formatter.py       # Telegram MarkdownV2 轉換、GFM 表格重構與代碼感知分段
-├── agent_runner.py    # agy CLI 子進程管理、stderr 即時解析與任務中止機制
-├── opencode_runner.py # 本地 OpenCode 後端：NDJSON 串流、Session 持久化與備援執行
-├── media_handler.py   # 照片、語音、檔案下載快取與本機生成媒體偵測
-├── ui_components.py   # 模型切換 Inline Keyboard、狀態與說明卡片排版
-├── policy_store.py    # 行為準則讀取與注入（手寫規則，無自動管線）
-├── watchdog.py        # 60 秒守護：存活、alive-but-broken 偵測與可驗證重啟
-├── test_*.py          # 驗收矩陣（注入、指令選單、串流上限與重啟契約）
-├── requirements.txt   # Python 依賴清單
-├── .env.example       # 設定檔範本
-└── README.md          # 說明文件
+├── bot.py                  # 核心應用程式入口、Telegram Update 路由與批次調度
+├── config.py               # 環境變數載入、設定解析與權限校驗
+├── memory_manager.py       # 本機持久記憶雙軌庫 (USER.md/MEMORY.md)、持續監聽與快照注入
+├── session_store.py        # 會話與進程抗掉線持久化狀態儲存庫 (JSON 磁碟原子寫入)
+├── formatter.py            # Telegram MarkdownV2 轉換、GFM 表格重構與代碼感知分段
+├── agent_runner.py         # agy CLI 子進程管理、stderr 即時解析與任務中止機制
+├── opencode_runner.py      # 本地 OpenCode 後端：NDJSON 串流、Session 持久化與備援執行
+├── workflow_commands.py    # Antigravity 原生工作流程與推理指令集 (/plan, /goal, /skills 等 10 項)
+├── learner.py              # Antigravity /learn 協議與雙軌持續自動學習引擎
+├── media_handler.py        # 照片、語音、檔案下載快取與本機生成媒體偵測
+├── ui_components.py        # 模型切換 Inline Keyboard、狀態與說明卡片排版
+├── policy_store.py         # 行為準則讀取與注入（手寫規則與 /learn 編譯規則）
+├── watchdog.py             # 60 秒守護：存活、忙碌狀態保護與可驗證重啟
+├── test_*.py               # 全套單元測試矩陣 (130+ 項測試 100% 通過)
+├── requirements.txt        # Python 依賴清單
+├── .env.example            # 設定檔範本
+└── README.md               # 說明文件
 ```
 
 ---
@@ -157,19 +190,36 @@ python bot.py
 
 ## 📖 指令一覽表
 
+### 🕹️ 核心會話與控制
 | 指令 | 說明 |
 |---|---|
 | `/start` | 歡迎頁面、查看目前 User ID 與快速導覽 |
 | `/usage` | 📊 查看當前會話、最近單輪與全域累計的 Token 用量統計 |
-| `/model` | 開啟互動式選單切換 AI 模型（支援點擊切換與分頁） |
-| `/memory` 或 `/mem` | 🧠 查看、搜尋與管理本機持久記憶 (`USER.md` / `MEMORY.md`) |
+| `/model` | 開啟互動式選單切換 AI 模型（支援點擊切換與分頁，含本地 OpenCode 模型） |
+| `/memory` 或 `/mem` | 🧠 查看、搜尋與手動管理本機持久記憶 (`USER.md` / `MEMORY.md`) |
 | `/compact` | 📦 壓縮當前會話上下文（提煉決策並瘦身） |
-| `/reset` 或 `/new` | 重置當前對話記憶，開啟全新 Session |
-| `/status` | 查看目前 Agent 運作狀態、Token 用量、會話 ID、工作目錄與上線時間 |
-| `/cancel` 或 `/stop` | 中止目前正在執行的長時間任務 |
-| `/steer <內容>` | 中止目前任務，清空已累積修正並以新指示立即重跑 |
-| `/clear` | 清理本機快取的多模態暫存檔案 |
-| `/help` | 顯示完整功能說明卡片 |
+| `/reset` 或 `/new` | 🔄 重置當前對話記憶，開啟全新 Session |
+| `/status` | 📈 查看目前 Agent 運作狀態、Token 用量、會話 ID、工作目錄與上線時間 |
+| `/cancel` 或 `/stop` | 🛑 中止目前正在執行的長時間任務 |
+| `/steer <內容>` | 🔄 中止目前任務，清空已累積修正並以新指示立即重跑 |
+| `/clear` | 🧹 清理本機快取的多模態暫存檔案 |
+| `/help` | ❓ 顯示完整分類功能說明卡片 |
+
+### 🧩 Antigravity 原生工作流程與推理指令
+| 指令 | 說明 |
+|---|---|
+| `/learn [重點]` | 🎓 遵循 Antigravity 原生 `<LEARN>` 協議，回顧會話或針對指正提煉 Policy/User/Memory 並即刻持久化 |
+| `/skills [名稱]` | 🧩 自動掃描專案與全域 Agent 技能庫（`SKILL.md` frontmatter），支援瀏覽清單或查看特定技能詳情 |
+| `/plan <需求>` | 📋 生成實作方案工件（Implementation Plan），分析現狀、步驟、技術選型與驗證標準，確認前不改代碼 |
+| `/grill-me <需求>` (別名 `/grill`) | 🥩 架構面試官模式，主動提問 3~5 個關鍵問題，深度盤點邊界情況 (Edge Cases) 與技術約束 |
+| `/goal <目標>` | 🎯 持續自主攻堅與除錯，循環推進直到終端目標 100% 達成（無須每步暫停等待確認） |
+| `/boost <任務>` | 🚀 啟用深度思考循環，專門攻克複雜競態條件 (Race Conditions)、棘手 Bug 或高難度演算法 |
+| `/teamwork <任務>` | 👥 啟動多 Agent 協同團隊模式，適用於跨儲存庫遷移、大規模重構與長週期複雜任務 |
+| `/btw <問題>` | 💡 在不中斷或阻塞主任務進度的情況下，在背景插問獨立問題 |
+| `/browser <網址/任務>` | 🌐 啟動沙盒化瀏覽器 Agent，進行即時網頁資料檢索、爬取、UI 排版或渲染驗證 |
+| `/diff` | 📝 即時查看當前工作區 Git 未提交的修改統計與具體差異 (`git diff`) |
+| `/schedule <時間> <指令>` | ⏰ 排程倒數計時器（例如 `10m`、`1h`）或背景定時任務 |
+
 
 ---
 
@@ -317,6 +367,25 @@ watchdog 的存活偵測也一樣：範圍太寬會讓一個**已死的 bot 看�
 **真因**：在多步驟工具調用回合中，模型每調用一次工具都會產出一段微型思考（Micro-CoT）。若簡單以 `\n\n.join(chunks)` 全域串聯，等於把模型在每一步 ReAct 迴圈中為了防遺忘而自我復述的目標與內部協議更新步驟全部暴露出來。
 
 **修法**：實作句子級內部套話過濾器（`_clean_sentence_noise`），並採三段式結構化合成（【需求分析與規劃】+【關鍵發現與進展】+【推演結論與行動】），過濾過渡碎屑並在同屏僅曝光一次。
+
+### 13. 任務執行中自我重啟「自殺」引發連線腰斬
+
+**症狀**：當指示 Agent 修改 `bot.py` 或周邊模組時，任務跑到一半 Telegram 狀態突然停住，長時間無回覆；再次詢問「怎麼停了」時，模型瞎猜是「服務重載信號觸發了工具超時保護」。
+
+**真因**：Agent 在處理任務時自作主張執行了 `restart.sh`、`launchctl kickstart` 或 `pkill -f bot.py`。由於當前執行的 `agy` 子進程是由主 Bot 進程派生，主進程一旦接收重載信號，所有正在執行的子進程與串流管道當場被系統 SIGTERM 斬斷。
+
+**修法**：
+1. 在 `protocol.md` 明確嚴禁任務中途自我重啟。
+2. 在 `watchdog.py` 增加 `is_agent_active()` 判定，當有任務執行時掛起守護重啟。
+3. 在 `bot.py` 記錄執行中狀態標記，若啟動時發現上次異常中斷，第一時間在 Telegram 主動推播中斷警報，不讓使用者乾等。
+
+### 14. Agent「非同步幻想」：許諾稍後自動完成卻終結進程
+
+**症狀**：Agent 在回覆中自信宣稱「我稍後會執行...」、「測試已在背景啟動，稍後會自動完成...」，但隨後再無任何動靜，任務直接爛尾。
+
+**真因**：Telegram Bot 採用 CLI 單回合執行模式（`agy --print`）。LLM 在文字中承諾未來動作且未發起工具調用時，CLI 即判定回合結束並直接退出進程（Exit 0）。背後根本不存在任何常駐定時器或接續線程會替它收尾。
+
+**修法**：在 `protocol.md` 與 `agent_runner.py` 每輪提示詞中強制注入「自主閉環鐵律 (Autonomous Completion Invariant)」——嚴禁未來時態承諾，單回合必須自主連續調用工具執行到底，直到全流程 100% 落地。
 
 ---
 
