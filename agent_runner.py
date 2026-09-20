@@ -571,8 +571,12 @@ async def _run_agy_turn(
         if AGENT_SYSTEM_PROMPT:
             effective_prompt = f"[系統指示: {AGENT_SYSTEM_PROMPT}]\n{effective_prompt}"
     else:
-        # On subsequent turns, reinforce thinking and response language
-        effective_prompt = f"[語言規範：思考過程（thinking）與回覆必須全程使用繁體中文進行實質推理。]\n{prompt}"
+        # On subsequent turns, reinforce thinking language and autonomous completion
+        effective_prompt = (
+            "[執行守則：1. 思考過程（thinking）與回覆必須全程使用繁體中文進行實質推理。\n"
+            "2. 本回合必須自主連續調用工具執行到底，嚴禁使用「稍後會自動執行/背景處理」等未來時態停下，直到任務全部實質落地並驗證完成。]\n"
+            f"{prompt}"
+        )
 
     # Cross-backend handoff: if the user recently chatted on the other backend
     # (e.g. switched model after quota exhaustion), inject those missed turns

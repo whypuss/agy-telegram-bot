@@ -7,6 +7,7 @@ Markdown formatting, message batching, and interactive UI.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -44,6 +45,7 @@ from config import (
     WORKSPACE_DIR,
     TEXT_BATCH_DELAY_SECONDS,
     MEDIA_BATCH_DELAY_SECONDS,
+    ACTIVE_TASK_FILE,
     CACHE_DIR,
     is_opencode_model,
     is_authorized,
@@ -474,6 +476,23 @@ async def process_agent_turn(
     cancelled_by_correction = False
     new_conv_id: Optional[str] = None
     try:
+        try:
+            ACTIVE_TASK_FILE.write_text(
+                json.dumps(
+                    {
+                        "uid": uid,
+                        "chat_id": chat.id,
+                        "thread_id": thread_id,
+                        "start_time": start_time,
+                        "prompt": prompt[:200],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as te:
+            logger.debug("Failed writing active task file: %s", te)
+
         reply_text, new_conv_id, turn_usage = await run_agent_turn(
             prompt=prompt,
             user_id=uid,
@@ -495,6 +514,10 @@ async def process_agent_turn(
         typing_active = False
         typing_task.cancel()
         refresher_task.cancel()
+        try:
+            ACTIVE_TASK_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     if cancelled_by_correction:
         # Turn was interrupted by an incoming correction — skip the final
@@ -1593,6 +1616,33 @@ async def post_init(app: Application) -> None:
         logger.info("Telegram bot commands registered: %d", len(commands))
     except Exception as e:
         logger.warning("Failed to register bot commands: %s", e)
+
+    # Check if a task was interrupted by an unexpected restart/crash
+    if ACTIVE_TASK_FILE.exists():
+        try:
+            raw = ACTIVE_TASK_FILE.read_text(encoding="utf-8").strip()
+            ACTIVE_TASK_FILE.unlink(missing_ok=True)
+            if raw:
+                data = json.loads(raw)
+                chat_id = data.get("chat_id")
+                thread_id = data.get("thread_id")
+                prompt_preview = (data.get("prompt") or "")[:60]
+                if chat_id:
+                    alert_text = (
+                        "⚠️ *Bot 服務剛才因系統重載或重啟啟動完成*\n"
+                        f"上一輪進行中的任務已被中斷：\n"
+                        f"📝 任務前綴：`{format_markdown_v2(prompt_preview)}...`\n\n"
+                        "💡 *若該任務尚未完成，請直接再次發送指令繼續執行。*"
+                    )
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=alert_text,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        message_thread_id=thread_id,
+                    )
+                    logger.info("Notified chat %s of interrupted task", chat_id)
+        except Exception as e:
+            logger.warning("Failed processing interrupted task marker: %s", e)
 
 
 

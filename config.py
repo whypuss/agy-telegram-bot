@@ -169,6 +169,10 @@ MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE: Path = Path(os.getenv("STATE_FILE", str(Path.home() / ".gemini" / "tg_bot_state.json")))
 STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+# Active task indicator file (used by watchdog to prevent killing busy agents, and on startup to notify if interrupted)
+ACTIVE_TASK_FILE: Path = Path(os.getenv("ACTIVE_TASK_FILE", str(Path.home() / ".gemini" / "tg_bot_active_task.json")))
+ACTIVE_TASK_FILE.parent.mkdir(parents=True, exist_ok=True)
+
 # ---------------------------------------------------------------------------
 # Auth Helper
 # ---------------------------------------------------------------------------

@@ -74,6 +74,20 @@ ERROR_STORM_THRESHOLD = 50      # sustained errors, not the odd blip
 FD_USAGE_RATIO = 0.8            # fraction of the soft limit that counts as a leak
 RESTART_COOLDOWN_SECONDS = 900  # never restart more than once per 15 minutes
 LAST_RESTART_FILE = BASE_DIR / ".watchdog_last_restart"
+ACTIVE_TASK_FILE = Path(os.getenv("ACTIVE_TASK_FILE", str(Path.home() / ".gemini" / "tg_bot_active_task.json")))
+
+
+def is_agent_active() -> bool:
+    """Check if an agent task is actively executing (via active task indicator or running child processes)."""
+    if ACTIVE_TASK_FILE.exists():
+        return True
+    try:
+        res = subprocess.run(["pgrep", "-f", "agy.*--print"], capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _recent_error_count() -> int:
@@ -256,6 +270,9 @@ def check():
 
     # Process is up and the network is fine — but is the bot actually working?
     if check_alive_but_broken():
+        if is_agent_active():
+            log("[Watchdog] Agent task actively running — suppressing broken-state restart.")
+            return
         if _restart_allowed():
             log("[Watchdog] Alive but broken. Restarting.")
             if restart_service():
