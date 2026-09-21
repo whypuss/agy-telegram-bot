@@ -13,7 +13,7 @@ if [ -f "$PLIST" ]; then
         echo "Service loaded & started via launchd."
     fi
 else
-    pkill -f "python.*bot\.py" 2>/dev/null || true
+    "$DIR/stop.sh"
     sleep 1
     nohup "$DIR/venv/bin/python3" "$DIR/bot.py" > "$DIR/bot.log" 2>&1 &
     echo "$!" > "$DIR/.bot.pid"
