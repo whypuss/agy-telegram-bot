@@ -426,10 +426,13 @@ async def process_agent_turn(
         now = time.time()
         progress_block = "\n".join(progress_items)
         content_changed = (progress_block != last_progress_block[0])
-        time_elapsed = (now - last_status_update[0] >= 1.5)
-        heartbeat_elapsed = (now - last_status_update[0] >= 5.0)
+        time_elapsed = (now - last_status_update[0] >= 1.0)
+        heartbeat_elapsed = (now - last_status_update[0] >= 4.0)
 
-        if force:
+        # Allow immediate first progress update
+        if not last_progress_block[0] and content_changed:
+            pass
+        elif force:
             if not heartbeat_elapsed:
                 return
         elif not ((content_changed and time_elapsed) or heartbeat_elapsed):
@@ -546,6 +549,7 @@ async def process_agent_turn(
                 user_id=uid,
                 on_progress=on_progress,
                 on_question=on_ide_question,
+                on_learn_notify=on_learn_notify,
             )
             new_conv_id = None
         else:
@@ -609,6 +613,18 @@ async def process_agent_turn(
                 final_items.append(it.replace("▶ ", "✓ "))
             else:
                 final_items.append(it)
+
+        # For IDE backend: ensure all executed steps from turn_usage are preserved
+        if user_backend == "ide" and turn_usage and turn_usage.get("steps"):
+            turn_steps = [s.replace("▶ ", "✓ ") for s in turn_usage["steps"][-8:]]
+            if len(turn_steps) >= len(final_items):
+                final_items = turn_steps
+        if user_backend == "ide" and not final_items:
+            final_items = [
+                "✓ 🧠 提示詞已送達 Antigravity IDE",
+                "✓ ⚙️ IDE 運算與工具調用完成",
+                "✓ 📝 回應內容已生成就緒",
+            ]
 
         # Enrich execution trace with actual thinking process if thinking occurred
         target_cid = new_conv_id or get_user_conversation(uid)

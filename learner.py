@@ -13,6 +13,7 @@ and continuous background task learning:
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
@@ -319,12 +320,14 @@ async def execute_learn_turn(
     Returns:
         (success, formatted_card_text, stats_dict)
     """
-    from agent_runner import run_agent_turn
+    from session_store import get_user_backend, get_user_conversation, get_user_oc_session, get_user_model
+    from config import is_opencode_model
 
     # Check active session status
+    backend = get_user_backend(user_id)
     agy_conv = get_user_conversation(user_id)
     oc_sess = get_user_oc_session(user_id)
-    has_active_session = bool(agy_conv or oc_sess)
+    has_active_session = bool(agy_conv or oc_sess or backend == "ide")
 
     prompt_parts = [ANTIGRAVITY_LEARN_INSTRUCTION]
     if user_note.strip():
@@ -338,11 +341,36 @@ async def execute_learn_turn(
         await on_progress("🧠 正在回顧對話交互並執行 Antigravity /learn 深度分析...")
 
     try:
-        reply_text, _, _ = await run_agent_turn(
-            prompt=full_prompt,
-            user_id=user_id,
-            on_progress=on_progress,
-        )
+        if backend == "ide":
+            from ide_runner import run_ide_turn
+            from ide_cdp import ide_controller, is_ide_cdp_online
+            if await is_ide_cdp_online(ide_controller.host, ide_controller.port):
+                reply_text, _ = await run_ide_turn(
+                    prompt=full_prompt,
+                    user_id=user_id,
+                    on_progress=on_progress,
+                )
+            else:
+                from opencode_runner import run_opencode_turn
+                reply_text, _, _ = await run_opencode_turn(
+                    prompt=full_prompt,
+                    user_id=user_id,
+                    on_progress=on_progress,
+                )
+        elif backend == "opencode" or is_opencode_model(get_user_model(user_id)):
+            from opencode_runner import run_opencode_turn
+            reply_text, _, _ = await run_opencode_turn(
+                prompt=full_prompt,
+                user_id=user_id,
+                on_progress=on_progress,
+            )
+        else:
+            from agent_runner import run_agent_turn
+            reply_text, _, _ = await run_agent_turn(
+                prompt=full_prompt,
+                user_id=user_id,
+                on_progress=on_progress,
+            )
     except Exception as e:
         logger.exception("execute_learn_turn failed: %s", e)
         return False, f"❌ 執行 /learn 學習失敗: {e}", {}
@@ -375,8 +403,8 @@ async def run_background_reviewer(
     from user corrections without blocking the user's conversation flow.
     """
     from agent_runner import _run_agy_turn
-    from config import is_opencode_model
-    from session_store import get_user_model
+    from config import is_opencode_model, OPENCODE_PATH
+    from session_store import get_user_backend, get_user_model
 
     resp_snippet = response_text[:1200] if response_text else "（無回應）"
     reviewer_prompt = BACKGROUND_REVIEWER_INSTRUCTION.format(
@@ -385,14 +413,28 @@ async def run_background_reviewer(
     )
 
     try:
+        backend = get_user_backend(user_id)
         model = get_user_model(user_id)
-        if is_opencode_model(model):
+        if backend == "opencode" or is_opencode_model(model):
             from opencode_runner import run_opencode_turn
             rev_reply, _, _ = await run_opencode_turn(
                 prompt=reviewer_prompt,
                 user_id=user_id,
                 model=model,
             )
+        elif backend == "ide":
+            if OPENCODE_PATH and os.path.exists(OPENCODE_PATH):
+                from opencode_runner import run_opencode_turn
+                rev_reply, _, _ = await run_opencode_turn(
+                    prompt=reviewer_prompt,
+                    user_id=user_id,
+                    model=None,
+                )
+            else:
+                rev_reply, _, _ = await _run_agy_turn(
+                    prompt=reviewer_prompt,
+                    user_id=user_id,
+                )
         else:
             rev_reply, _, _ = await _run_agy_turn(
                 prompt=reviewer_prompt,

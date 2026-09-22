@@ -76,6 +76,7 @@ async def run_ide_turn(
     user_id: int,
     on_progress: Optional[Callable[[str], Coroutine]] = None,
     on_question: Optional[Callable[[dict], Coroutine]] = None,
+    on_learn_notify: Optional[Callable[[str], Coroutine]] = None,
     timeout_seconds: int = 1800,
 ) -> Tuple[str, Optional[dict]]:
     """Execute a single agent turn by injecting the prompt into Antigravity IDE.
@@ -85,6 +86,7 @@ async def run_ide_turn(
         user_id: Telegram user ID
         on_progress: Callback to report status string
         on_question: Callback when IDE presents an interactive question/modal
+        on_learn_notify: Callback when auto-learner synthesizes rules
         timeout_seconds: Maximum time to wait for agent completion
         
     Returns:
@@ -107,7 +109,7 @@ async def run_ide_turn(
 
     if on_progress:
         try:
-            await on_progress("⚡ 正在將訊息送入 Antigravity IDE...")
+            await on_progress("▶ ⚡ 正在將訊息送入 Antigravity IDE...")
         except Exception:
             pass
 
@@ -117,6 +119,12 @@ async def run_ide_turn(
     except Exception as e:
         logger.error("Failed to inject prompt into Antigravity IDE: %s", e)
         return (f"❌ 發送提示詞至 Antigravity IDE 失敗: {e}", None)
+
+    if on_progress:
+        try:
+            await on_progress("▶ ⚡ 訊息已送入 Antigravity IDE，等待回應...")
+        except Exception:
+            pass
 
     # 3. Monitor execution loop
     start_time = time.time()
@@ -216,12 +224,21 @@ async def run_ide_turn(
     append_transcript(user_id, "user", "ide", prompt)
     append_transcript(user_id, "assistant", "ide", response_text)
 
-    # IDE CDP doesn't report granular tokens per turn, provide elapsed stats
+    # 6. Continuous Auto-Learner: check for corrections and persist learnings
+    try:
+        from learner import auto_learn_from_turn
+        auto_learn_from_turn(user_id, prompt, response_text, notify_callback=on_learn_notify)
+    except Exception as le:
+        logger.debug("Auto-learn check error in IDE turn: %s", le)
+
+    # IDE CDP doesn't report granular tokens per turn, provide elapsed stats & steps
     turn_usage = {
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
         "duration_seconds": round(duration, 1),
         "backend": "ide",
+        "steps": last_synced_steps,
     }
     return response_text, turn_usage
+

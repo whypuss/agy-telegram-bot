@@ -569,7 +569,7 @@ class AntigravityIDEController:
                     }}
 
                     var seen = {{}};
-                    var items = Array.from(lastTurn.querySelectorAll("button, div.whitespace-nowrap"));
+                    var items = Array.from(lastTurn.querySelectorAll('[class*="min-h-8"], [class*="tabular-nums"], [class*="whitespace-nowrap"], button'));
                     for (var i = 0; i < items.length; i++) {{
                         var el = items[i];
                         var txt = (el.innerText || '').trim();

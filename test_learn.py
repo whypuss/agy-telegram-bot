@@ -215,7 +215,8 @@ def test_background_auto_learner():
 ```
 """
             async def run_async_test():
-                with patch("agent_runner._run_agy_turn", return_value=(mock_reviewer_reply, None, None)):
+                with patch("agent_runner._run_agy_turn", return_value=(mock_reviewer_reply, None, None)), \
+                     patch("opencode_runner.run_opencode_turn", return_value=(mock_reviewer_reply, None, None)):
                     res = await learner.run_background_reviewer(999, test_prompt, test_resp, notify_callback=mock_notify)
                     return res
 
