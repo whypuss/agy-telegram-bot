@@ -336,6 +336,58 @@ def format_usage_card(
     return "\n".join(lines)
 
 
+def build_backend_keyboard(current_backend: str) -> InlineKeyboardMarkup:
+    """Build Inline Keyboard to select active agent backend."""
+    ide_label = "⚡ Antigravity IDE (CDP 遙控) ✓" if current_backend == "ide" else "⚡ Antigravity IDE (CDP 遙控)"
+    agy_label = "🚀 Antigravity CLI (agy) ✓" if current_backend == "agy" else "🚀 Antigravity CLI (agy)"
+    oc_label = "💻 本地 OpenCode ✓" if current_backend == "opencode" else "💻 本地 OpenCode"
+
+    keyboard = [
+        [InlineKeyboardButton(ide_label, callback_data="backend_set:ide")],
+        [InlineKeyboardButton(agy_label, callback_data="backend_set:agy")],
+        [InlineKeyboardButton(oc_label, callback_data="backend_set:opencode")],
+        [InlineKeyboardButton("✖ 關閉選單", callback_data="backend_set:cancel")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_question_keyboard(question: dict) -> InlineKeyboardMarkup:
+    """Build Inline Keyboard for an interactive modal / ask_question prompt."""
+    options = question.get("options") or []
+    keyboard = []
+    for idx, opt in enumerate(options, 1):
+        # Truncate label for button display
+        lbl = f"{idx}. {opt}"
+        if len(lbl) > 35:
+            lbl = lbl[:32] + "..."
+        keyboard.append([InlineKeyboardButton(lbl, callback_data=f"ide_ans:{idx}")])
+
+    if not options:
+        # Simple confirm/cancel prompt
+        keyboard.append([
+            InlineKeyboardButton("✓ 確認 / 繼續 (Proceed)", callback_data="ide_ans:proceed"),
+            InlineKeyboardButton("✕ 跳過 (Skip)", callback_data="ide_ans:skip"),
+        ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_ide_model_keyboard(available_models: list[str], current_model: str) -> InlineKeyboardMarkup:
+    """Build Inline Keyboard for selecting active model inside Antigravity IDE."""
+    keyboard = []
+    curr_clean = (current_model or "").lower().strip()
+    for m in available_models:
+        m_clean = m.lower().strip()
+        is_active = (m_clean == curr_clean) or (curr_clean and (curr_clean in m_clean or m_clean in curr_clean))
+        lbl = f"✓ {m}" if is_active else m
+        keyboard.append([InlineKeyboardButton(lbl, callback_data=f"ide_model_set:{m}")])
+    keyboard.append([
+        InlineKeyboardButton("🔄 重新整理", callback_data="ide_model_refresh"),
+        InlineKeyboardButton("✖ 關閉", callback_data="ide_model_cancel"),
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+
 def format_status_card(
     user_id: int,
     user_name: str,
@@ -348,12 +400,23 @@ def format_status_card(
     usage_stats: dict | None = None,
     oc_session_id: str | None = None,
     oc_model: str | None = None,
+    active_backend: str = "agy",
+    ide_port: int = 9334,
+    ide_online: bool = False,
 ) -> str:
     """Format a rich status overview in standard Markdown."""
     status_icon = "🟢 正在運行任務..." if is_running else "⚪ 空閒中 (Idle)"
     conv_display = f"`{conversation_id}`" if conversation_id else "*（尚未建立，傳送訊息將開啟）*"
     proxy_display = f"`{proxy_url}`" if proxy_url else "無代理 (Direct Connection)"
-    backend_label = "💻 本地 OpenCode" if is_opencode_model(current_model) else "⚡ Antigravity"
+    
+    if active_backend == "ide":
+        ide_status_txt = "🟢 線上" if ide_online else "🔴 未連線"
+        backend_label = f"⚡ Antigravity IDE (CDP 埠 {ide_port} · {ide_status_txt})"
+    elif active_backend == "opencode" or is_opencode_model(current_model):
+        backend_label = "💻 本地 OpenCode"
+    else:
+        backend_label = "🚀 Antigravity CLI (agy)"
+
     fallback_display = "agy 異常時自動切換 💻 本地 OpenCode 備援"
     oc_sess_display = f"`{oc_session_id}`" if oc_session_id else "（無）"
 
@@ -379,7 +442,7 @@ def format_status_card(
         f"📂 **工作目錄**: `{workspace_dir}`\n"
         f"🌐 **網路代理**: {proxy_display}\n"
         f"⏱️ **Bot 上線時長**: {uptime_str}\n\n"
-        f"💡 *提示：使用 /model 切換模型（含 OpenCode 模型），使用 /usage 查看詳細 Token 用量，使用 /reset 重置會話記憶。*"
+        f"💡 *提示：使用 /backend 切換 IDE/CLI/OpenCode，使用 /screenshot 遠端截取 IDE 畫面，使用 /model 切換模型。*"
     )
 
 
@@ -390,6 +453,9 @@ def format_help_card(current_model: str, timeout_seconds: int) -> str:
         "你可以透過此 Bot 隨時隨地遠端調度你的 Antigravity AI Agent。\n"
         "Agent 具備完整的程式碼編寫、終端指令執行、文件讀寫與多模態分析能力。\n\n"
         "🎯 **會話與系統控制：**\n"
+        "• `/app` 或 `/backend` — 🔀 切換執行後端（⚡ Antigravity IDE / 🚀 agy CLI / 💻 OpenCode）\n"
+        "• `/screenshot` 或 `/shot` — 📸 遠端即時截取 Antigravity IDE 當前畫面\n"
+        "• `/ide` — ⚡ 檢查 Antigravity IDE CDP 連線狀態與視窗資訊\n"
         "• `/usage` — 📊 查看 Token 用量與資源消耗統計\n"
         "• `/model` — 🧠 點擊按鈕互動式切換 AI 模型（含 💻 本地 OpenCode 模型）\n"
         "• `/memory` — 🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)\n"

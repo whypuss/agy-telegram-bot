@@ -52,30 +52,35 @@ from session_store import (
     build_handoff_context,
     get_user_oc_session,
     reset_user_oc_session,
+    get_user_oc_model,
     clear_transcript,
     save_state,
+    get_user_backend,
 )
 from memory_manager import build_memory_context, monitor_and_extract, add_entry, add_session_summary
 
 # User ID -> Active subprocess
 _active_processes: Dict[int, asyncio.subprocess.Process] = {}
-
-# Users whose running process was deliberately terminated via _cancel_agy_task
-# (user cancel / correction steer). Used to convert the resulting non-zero
-# exit into asyncio.CancelledError instead of a spurious "執行失敗" message.
 _cancelled_users: set = set()
 
-# User ID -> Last known agy cumulative usage (agy-only baseline for turn deltas,
-# backed by session_store.user_agy_cumulative)
+# Process lifetime tracking for watchdog and leak detection
+_proc_start_times: Dict[int, float] = {}
+
+# User ID -> Cumulative stream usage from previous turns in the active conversation
 _agy_last_cumulative = user_agy_cumulative
 
-# User ID -> Backend that served the last turn ("agy" | "opencode" | "agy+fallback")
+# User ID -> Backend that served the last turn ("agy" | "opencode" | "ide" | "agy+fallback")
 _last_backend: Dict[int, str] = {}
 
 
 def get_last_backend(user_id: int) -> str:
     """Return which backend served the user's last turn."""
-    return _last_backend.get(user_id, "opencode" if is_opencode_model(get_user_model(user_id)) else "agy")
+    if user_id in _last_backend:
+        return _last_backend[user_id]
+    backend = get_user_backend(user_id)
+    if backend == "ide":
+        return "ide"
+    return "opencode" if is_opencode_model(get_user_model(user_id)) else "agy"
 
 
 def is_user_task_running(user_id: int) -> bool:
@@ -85,9 +90,17 @@ def is_user_task_running(user_id: int) -> bool:
         return True
     try:
         from opencode_runner import is_oc_task_running
-        return is_oc_task_running(user_id)
+        if is_oc_task_running(user_id):
+            return True
     except Exception:
-        return False
+        pass
+    try:
+        from ide_runner import is_ide_task_running
+        if is_ide_task_running(user_id):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 async def cancel_user_task(user_id: int) -> bool:
@@ -96,6 +109,12 @@ async def cancel_user_task(user_id: int) -> bool:
     try:
         from opencode_runner import cancel_oc_task
         if await cancel_oc_task(user_id):
+            cancelled = True
+    except Exception:
+        pass
+    try:
+        from ide_runner import cancel_ide_task
+        if await cancel_ide_task(user_id):
             cancelled = True
     except Exception:
         pass
@@ -1032,9 +1051,10 @@ async def run_agent_turn(
     user_id: int,
     on_progress: Optional[Callable[[str], Coroutine]] = None,
     on_learn_notify: Optional[Callable[[str], Coroutine]] = None,
+    on_question: Optional[Callable[[dict], Coroutine]] = None,
 ) -> Tuple[str, Optional[str], Optional[dict]]:
     """
-    Execute a turn, routing to agy or local OpenCode by the user's model.
+    Execute a turn, routing to Antigravity IDE, agy CLI, or local OpenCode.
 
     Agy-model turns automatically fall back to local OpenCode once when the
     agy backend errors, times out, or returns empty.
@@ -1042,15 +1062,29 @@ async def run_agent_turn(
     Returns:
         (response_text, new_conversation_id, turn_usage)
     """
+    active_backend = get_user_backend(user_id)
+    if active_backend == "ide":
+        from ide_runner import run_ide_turn
+        _last_backend[user_id] = "ide"
+        reply_text, turn_usage = await run_ide_turn(
+            prompt=prompt,
+            user_id=user_id,
+            on_progress=on_progress,
+            on_question=on_question,
+            timeout_seconds=AGY_TIMEOUT,
+        )
+        return reply_text, None, turn_usage
+
     model = get_user_model(user_id)
 
-    if is_opencode_model(model):
+    if active_backend == "opencode" or is_opencode_model(model):
         from opencode_runner import run_opencode_turn
         _last_backend[user_id] = "opencode"
+        oc_model = model if is_opencode_model(model) else get_user_oc_model(user_id)
         return await run_opencode_turn(
             prompt=prompt,
             user_id=user_id,
-            model=model,
+            model=oc_model,
             on_progress=on_progress,
             on_learn_notify=on_learn_notify,
         )

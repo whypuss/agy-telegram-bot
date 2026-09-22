@@ -25,11 +25,16 @@ from config import (
     OPENCODE_DEFAULT_MODEL,
     WORKSPACE_DIR,
     AGENT_SYSTEM_PROMPT,
+    is_opencode_model,
 )
 
 logger = logging.getLogger("agy-tg-bot.opencode")
 
-from agent_runner import STREAM_LINE_LIMIT
+from agent_runner import (
+    STREAM_LINE_LIMIT,
+    _clean_and_dedup_thinking,
+    _translate_thinking_to_zh_tw,
+)
 
 from session_store import (
     user_session_usage,
@@ -37,6 +42,7 @@ from session_store import (
     user_lifetime_usage,
     get_user_oc_session,
     set_user_oc_session,
+    reset_user_oc_session,
     get_user_oc_model,
     append_transcript,
     build_handoff_context,
@@ -51,6 +57,22 @@ _oc_active_processes: Dict[int, asyncio.subprocess.Process] = {}
 # (user cancel / correction steer). Used to convert the resulting non-zero
 # exit into asyncio.CancelledError instead of a spurious "執行失敗" message.
 _oc_cancelled_users: set = set()
+
+# User ID -> Last extracted & synthesized thinking text (for status card injection)
+_user_oc_last_thinking: Dict[int, str] = {}
+
+
+def get_user_oc_thinking(user_id: int) -> Optional[str]:
+    """Return the last synthesized thinking process for an OpenCode user turn."""
+    return _user_oc_last_thinking.get(user_id)
+
+
+def set_user_oc_thinking(user_id: int, thinking: Optional[str]) -> None:
+    """Store or clear the last synthesized thinking process for an OpenCode user turn."""
+    if thinking:
+        _user_oc_last_thinking[user_id] = thinking
+    else:
+        _user_oc_last_thinking.pop(user_id, None)
 
 
 def is_oc_task_running(user_id: int) -> bool:
@@ -91,13 +113,15 @@ _PATH_RE = re.compile(r"(/(?:[\w\-.~ ]+/)*[\w\-.~ ]+\.\w{2,5})")
 
 
 def _extract_existing_files(prompt: str, limit: int = 5) -> List[str]:
-    """Find absolute file paths mentioned in the prompt that exist on disk."""
+    """Find absolute file paths mentioned in the prompt that exist on disk (<= 256 KiB)."""
     found: List[str] = []
     for match in _PATH_RE.finditer(prompt):
         candidate = match.group(1).strip()
         try:
             if os.path.isfile(candidate) and candidate not in found:
-                found.append(candidate)
+                # Guard: skip massive files (> 256 KiB) to protect context window
+                if os.path.getsize(candidate) <= 256 * 1024:
+                    found.append(candidate)
                 if len(found) >= limit:
                     break
         except Exception:
@@ -105,20 +129,76 @@ def _extract_existing_files(prompt: str, limit: int = 5) -> List[str]:
     return found
 
 
-def _parse_tool_to_indicator(tool_name: str, active: bool) -> str:
-    """Map an opencode tool name to a user-friendly indicator."""
-    name = (tool_name or "").lower()
-    if "bash" in name or "command" in name or "shell" in name:
+def _parse_tool_to_indicator(tool_or_part, active: bool = True) -> str:
+    """Map an opencode tool name or event part to a detailed, user-friendly indicator."""
+    if isinstance(tool_or_part, dict):
+        part = tool_or_part
+        tool_name = (part.get("tool") or "").lower()
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        status = state.get("status")
+        is_completed = (status == "completed") or (not active)
+
+        input_data = state.get("input") if isinstance(state.get("input"), dict) else (part.get("input") or {})
+        if not isinstance(input_data, dict):
+            input_data = {}
+        title = state.get("title") or ""
+
+        # Tool-specific details
+        if "bash" in tool_name or "command" in tool_name or "shell" in tool_name:
+            cmd = input_data.get("command") or title or ""
+            cmd = str(cmd).strip()
+            if len(cmd) > 45:
+                cmd = cmd[:42] + "..."
+            desc = f"執行終端指令 `{cmd}`" if cmd else "執行終端指令"
+        elif "read" in tool_name or "view" in tool_name or "cat" in tool_name:
+            path = input_data.get("path") or input_data.get("file_path") or title or ""
+            path = os.path.basename(str(path)) if path else ""
+            desc = f"讀取檔案 `{path}`" if path else "讀取檔案"
+        elif "write" in tool_name or "edit" in tool_name or "apply" in tool_name or "patch" in tool_name:
+            path = input_data.get("path") or input_data.get("file_path") or title or ""
+            path = os.path.basename(str(path)) if path else ""
+            desc = f"編輯寫入檔案 `{path}`" if path else "編輯寫入檔案"
+        elif "grep" in tool_name or "glob" in tool_name or "search" in tool_name or "find" in tool_name:
+            q = input_data.get("pattern") or input_data.get("query") or title or ""
+            q = str(q).strip()
+            if len(q) > 35:
+                q = q[:32] + "..."
+            desc = f"檢索代碼/檔案 `{q}`" if q else "檢索代碼/檔案"
+        elif "web" in tool_name or "fetch" in tool_name or "browser" in tool_name:
+            q = input_data.get("query") or input_data.get("url") or title or ""
+            q = str(q).strip()
+            if len(q) > 35:
+                q = q[:32] + "..."
+            desc = f"聯網搜尋檢索 `{q}`" if q else "聯網搜尋檢索"
+        elif "todowrite" in tool_name or "todo" in tool_name:
+            desc = "規劃任務清單"
+        else:
+            desc = f"調用工具 `{tool_name}`" if tool_name else "調用工具"
+
+        time_info = state.get("time") if isinstance(state.get("time"), dict) else (part.get("time") or {})
+        dur_str = ""
+        if isinstance(time_info, dict):
+            start_ms = time_info.get("start")
+            end_ms = time_info.get("end")
+            if start_ms and end_ms and end_ms > start_ms:
+                dur_sec = (end_ms - start_ms) / 1000.0
+                if dur_sec > 0.05:
+                    dur_str = f" ({dur_sec:.1f}s)"
+
+        return f"✓ 🔧 {desc}{dur_str}" if is_completed else f"▶ 🔧 {desc} (OpenCode)"
+
+    tool_name = (str(tool_or_part) or "").lower()
+    if "bash" in tool_name or "command" in tool_name or "shell" in tool_name:
         desc = "執行終端指令"
-    elif "read" in name or "view" in name:
+    elif "read" in tool_name or "view" in tool_name:
         desc = "讀取檔案"
-    elif "write" in name or "edit" in name or "apply" in name or "patch" in name:
+    elif "write" in tool_name or "edit" in tool_name or "apply" in tool_name or "patch" in tool_name:
         desc = "編輯寫入檔案"
-    elif "grep" in name or "glob" in name or "search" in name or "find" in name:
+    elif "grep" in tool_name or "glob" in tool_name or "search" in tool_name or "find" in tool_name:
         desc = "檢索代碼/檔案"
-    elif "web" in name or "fetch" in name or "browser" in name:
+    elif "web" in tool_name or "fetch" in tool_name or "browser" in tool_name:
         desc = "聯網搜尋檢索"
-    elif "todowrite" in name or "todo" in name:
+    elif "todowrite" in tool_name or "todo" in tool_name:
         desc = "規劃任務清單"
     else:
         desc = f"調用工具 `{tool_name}`" if tool_name else "調用工具"
@@ -143,7 +223,12 @@ async def run_opencode_turn(
     Returns:
         (response_text, session_id, turn_usage)
     """
+    if model and not is_opencode_model(model):
+        logger.warning("Ignoring non-OpenCode model '%s' for user %s; using user oc model or default", model, user_id)
+        model = None
     oc_model = (model or get_user_oc_model(user_id) or OPENCODE_DEFAULT_MODEL).strip()
+    if not is_opencode_model(oc_model):
+        oc_model = OPENCODE_DEFAULT_MODEL
     session_id = get_user_oc_session(user_id)
 
     effective_prompt = prompt
@@ -151,14 +236,31 @@ async def run_opencode_turn(
         mem_ctx = build_memory_context()
         if mem_ctx:
             effective_prompt = f"{mem_ctx}\n{prompt}"
+        if AGENT_SYSTEM_PROMPT:
+            effective_prompt = f"[系統指示: {AGENT_SYSTEM_PROMPT}]\n{effective_prompt}"
+        effective_prompt = (
+            "[執行守則：1. 思考過程（thinking）與回覆必須全程使用繁體中文進行實質推理。\n"
+            "2. 本回合必須自主連續調用工具執行到底，嚴禁使用「稍後會自動執行/背景處理」等未來時態停下，直到任務全部實質落地並驗證完成。]\n"
+            f"{effective_prompt}"
+        )
+    else:
+        effective_prompt = (
+            "[執行守則：1. 思考過程（thinking）與回覆必須全程使用繁體中文進行實質推理。\n"
+            "2. 本回合必須自主連續調用工具執行到底，嚴禁使用「稍後會自動執行/背景處理」等未來時態停下，直到任務全部實質落地並驗證完成。]\n"
+            f"{prompt}"
+        )
 
     # Cross-backend handoff: inject recent turns this backend missed while the
     # other backend was serving (e.g. user switched model after quota ran out).
     handoff_ctx = build_handoff_context(user_id, "opencode")
     if handoff_ctx:
         effective_prompt = f"{handoff_ctx}\n\n{effective_prompt}"
-    if AGENT_SYSTEM_PROMPT:
-        effective_prompt = f"[系統指示: {AGENT_SYSTEM_PROMPT}]\n{effective_prompt}"
+
+    # Guard: prevent oversized input from instantly blowing up model context window
+    if len(effective_prompt) > 30000:
+        head = effective_prompt[:10000]
+        tail = effective_prompt[-15000:]
+        effective_prompt = f"{head}\n\n... [為避免超出模型上下文上限，已智慧修剪中間冗長內容] ...\n\n{tail}"
 
     cmd = [OPENCODE_PATH, "run", "--format", "json", "-m", oc_model]
     if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
@@ -234,7 +336,22 @@ async def run_opencode_turn(
             etype = event.get("type")
             part = event.get("part") or {}
 
-            if etype == "text" and isinstance(part, dict):
+            meta = part.get("metadata") if isinstance(part, dict) else {}
+            phase = ""
+            if isinstance(meta, dict):
+                openai_meta = meta.get("openai") or {}
+                if isinstance(openai_meta, dict):
+                    phase = openai_meta.get("phase") or ""
+
+            if etype in ("reasoning", "thought", "thinking") and isinstance(part, dict):
+                r = part.get("text") or part.get("reasoning") or part.get("thought") or ""
+                if r:
+                    reasoning_parts.append(r)
+            elif etype == "text" and isinstance(part, dict) and phase == "commentary":
+                r = part.get("text") or ""
+                if r:
+                    reasoning_parts.append(r)
+            elif etype == "text" and isinstance(part, dict):
                 text = part.get("text") or ""
                 if text:
                     text_parts.append(text)
@@ -243,12 +360,8 @@ async def run_opencode_turn(
                             await on_progress("▶ 📝 正在生成回答... (OpenCode)")
                         except Exception:
                             pass
-            elif etype in ("reasoning", "thought", "thinking") and isinstance(part, dict):
-                r = part.get("text") or part.get("reasoning") or part.get("thought") or ""
-                if r:
-                    reasoning_parts.append(r)
             elif etype == "tool_use" and isinstance(part, dict):
-                indicator = _parse_tool_to_indicator(part.get("tool", ""), active=True)
+                indicator = _parse_tool_to_indicator(part, active=True)
                 if indicator and on_progress:
                     try:
                         await on_progress(indicator)
@@ -264,9 +377,23 @@ async def run_opencode_turn(
                 in_tokens += in_tokens_local
                 out_tokens += out_tokens_local
                 try:
-                    reasoning_tokens += int(toks.get("reasoning", 0))
+                    r_toks_local = int(toks.get("reasoning", 0))
+                    reasoning_tokens += r_toks_local
+                except (TypeError, ValueError):
+                    r_toks_local = 0
+                try:
+                    cache = toks.get("cache") or {}
+                    cache_read += int(cache.get("read", 0))
                 except (TypeError, ValueError):
                     pass
+                if on_progress:
+                    try:
+                        if r_toks_local > 0:
+                            await on_progress("✓ 🧠 深度思考完成 (OpenCode)")
+                        else:
+                            await on_progress("✓ 🧠 推理步驟完成 (OpenCode)")
+                    except Exception:
+                        pass
                 try:
                     cache = toks.get("cache") or {}
                     cache_read += int(cache.get("read", 0))
@@ -356,10 +483,18 @@ async def run_opencode_turn(
 
     duration = max(0.1, time.time() - start_time)
     response_text = "".join(text_parts).strip()
+    clean_th: Optional[str] = None
     if reasoning_parts:
-        r_text = "".join(reasoning_parts).strip()
-        if r_text and "思考過程" not in response_text[:120]:
-            response_text = f"💭 **思考過程**：\n{r_text}\n\n---\n\n{response_text}"
+        try:
+            clean_th = _clean_and_dedup_thinking(reasoning_parts)
+        except Exception as e:
+            logger.debug("Failed cleaning opencode thinking: %s", e)
+            clean_th = "\n\n".join(r.strip() for r in reasoning_parts if r.strip())
+
+    set_user_oc_thinking(user_id, clean_th)
+
+    if not response_text and clean_th:
+        response_text = clean_th
 
     turn_usage: Optional[dict] = None
     total_tokens = in_tokens + out_tokens
@@ -396,12 +531,39 @@ async def run_opencode_turn(
         set_user_oc_session(user_id, new_session_id)
     save_state()
 
+    # Smart context warning when session token total approaches light model limits
+    prev_total = user_session_usage.get(user_id, {}).get("total_tokens", 0)
+    if prev_total >= 45000 and response_text and not response_text.startswith("❌"):
+        if "compact" not in response_text[-120:].lower():
+            response_text += (
+                f"\n\n💡 **提示**：目前會話累積 Token 已達 {prev_total:,}，"
+                "接近部分輕量模型上下文上限，建議輸入 `/compact` 壓縮記憶以保持流暢執行。"
+            )
+
     if not response_text:
         detail = "; ".join(error_events) or "\n".join(stderr_lines[-5:])
         if proc.returncode not in (0, None) or error_events:
             # One automatic retry for transient provider errors (rate limit,
             # quota hiccups) — but never after a deliberate cancellation.
             if not _retried and user_id not in _oc_cancelled_users:
+                # If context length exceeded, automatically reset session and retry with fresh condensed prompt
+                is_ctx_err = any(k in detail.lower() for k in ("invalid", "context", "length", "too long", "token", "maximum"))
+                if is_ctx_err and session_id:
+                    logger.warning("OpenCode hit context overflow for user %s; auto-resetting session and retrying with handoff", user_id)
+                    reset_user_oc_session(user_id)
+                    if on_progress:
+                        try:
+                            await on_progress("⚠️ 會話超出模型上下文上限，正在自動重置會話並重試...")
+                        except Exception:
+                            pass
+                    return await run_opencode_turn(
+                        prompt=prompt,
+                        user_id=user_id,
+                        model=model,
+                        on_progress=on_progress,
+                        _retried=True,
+                    )
+
                 logger.warning(
                     "opencode exited %s for user %s with no output (detail: %s); retrying once",
                     proc.returncode, user_id, (detail.strip() or "<none>")[:300],
@@ -428,7 +590,7 @@ async def run_opencode_turn(
                 if any(k in detail.lower() for k in ("invalid", "context", "length", "too long", "token")):
                     lines.append(
                         "\n💡 可能係會話上下文超出該模型嘅上下文上限，"
-                        "建議 /model 切換大上下文模型後再試。"
+                        "建議使用 /compact 壓縮會話或使用 /model 切換大上下文模型後再試。"
                     )
             else:
                 lines.append(

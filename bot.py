@@ -9,6 +9,7 @@ Markdown formatting, message batching, and interactive UI.
 import asyncio
 import json
 import logging
+import io
 import os
 import re
 import sys
@@ -47,6 +48,8 @@ from config import (
     MEDIA_BATCH_DELAY_SECONDS,
     ACTIVE_TASK_FILE,
     CACHE_DIR,
+    IDE_CDP_PORT,
+    IDE_CDP_HOST,
     is_opencode_model,
     is_authorized,
 )
@@ -82,17 +85,24 @@ from session_store import (
     get_user_oc_model,
     reset_user_oc_session,
     clear_transcript,
+    get_user_backend,
+    set_user_backend,
 )
 from learner import execute_learn_turn
 from ui_components import (
     AVAILABLE_MODELS,
     build_model_keyboard,
+    build_backend_keyboard,
+    build_question_keyboard,
+    build_ide_model_keyboard,
     build_cancel_keyboard,
     format_status_card,
     format_usage_card,
     format_help_card,
     resolve_model_alias,
 )
+from ide_cdp import ide_controller, is_ide_cdp_online, resolve_active_target
+from ide_runner import run_ide_turn, cancel_ide_task, is_ide_task_running, answer_pending_question
 
 # ---------------------------------------------------------------------------
 # Logging Setup
@@ -332,9 +342,21 @@ async def process_agent_turn(
     chat = update.effective_chat
     thread_id = getattr(update.message, "message_thread_id", None) if update.message else None
 
-    current_model = get_user_model(uid)
+    user_backend = get_user_backend(uid)
+    if user_backend == "ide":
+        backend_label = "⚡ Antigravity IDE"
+        try:
+            from ide_cdp import ide_controller
+            current_model = await ide_controller.get_active_model() or "Antigravity Agent"
+        except Exception:
+            current_model = "Antigravity IDE Agent"
+    elif is_opencode_model(get_user_model(uid)):
+        backend_label = "💻 本地 OpenCode"
+        current_model = get_user_model(uid)
+    else:
+        backend_label = "🚀 Antigravity CLI"
+        current_model = get_user_model(uid)
     model_code = current_model.replace('\\', '\\\\').replace('`', '\\`')
-    backend_label = "💻 本地 OpenCode" if is_opencode_model(current_model) else "⚡ Antigravity"
 
     # Launch initial status message concurrently with agent startup (saves ~300-500ms startup RTT)
     status_msg_task = asyncio.create_task(
@@ -447,6 +469,16 @@ async def process_agent_turn(
 
     # Progress line callback
     async def on_progress(indicator: str):
+        if indicator.startswith("SYNC:"):
+            try:
+                items = json.loads(indicator[5:])
+                progress_items.clear()
+                progress_items.extend(items[-8:])
+                await _push_status()
+            except Exception as e:
+                logger.debug("Failed parsing SYNC progress: %s", e)
+            return
+
         # In-place replacement: if previous item was active and new indicator completes it, update in-place
         if progress_items and progress_items[-1].startswith("▶ ") and indicator.startswith("✓ "):
             progress_items[-1] = indicator
@@ -493,12 +525,36 @@ async def process_agent_turn(
         except Exception as te:
             logger.debug("Failed writing active task file: %s", te)
 
-        reply_text, new_conv_id, turn_usage = await run_agent_turn(
-            prompt=prompt,
-            user_id=uid,
-            on_progress=on_progress,
-            on_learn_notify=on_learn_notify,
-        )
+        user_backend = get_user_backend(uid)
+        if user_backend == "ide":
+            async def on_ide_question(q_data):
+                header = q_data.get("header", "Antigravity IDE 詢問")
+                kb = build_question_keyboard(q_data)
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        message_thread_id=thread_id,
+                        text=f"❓ **{header}**\n\n請在下方選擇您的回答或操作：",
+                        reply_markup=kb,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception as qe:
+                    logger.warning("Failed sending IDE question keyboard: %s", qe)
+
+            reply_text, turn_usage = await run_ide_turn(
+                prompt=prompt,
+                user_id=uid,
+                on_progress=on_progress,
+                on_question=on_ide_question,
+            )
+            new_conv_id = None
+        else:
+            reply_text, new_conv_id, turn_usage = await run_agent_turn(
+                prompt=prompt,
+                user_id=uid,
+                on_progress=on_progress,
+                on_learn_notify=on_learn_notify,
+            )
     except asyncio.CancelledError:
         cancelled_by_correction = _has_pending_corrections(uid)
         reply_text = "" if cancelled_by_correction else "🛑 任務已由使用者中止。"
@@ -534,12 +590,14 @@ async def process_agent_turn(
         # Update status message to Completed with token metrics & preserved process trace
         elapsed_total = format_elapsed(int(time.time() - start_time))
         served_backend = get_last_backend(uid)
-        if served_backend == "agy+fallback":
+        if user_backend == "ide":
+            served_label = "⚡ Antigravity IDE"
+        elif served_backend == "agy+fallback":
             served_label = "🔁 OpenCode 備援"
         elif served_backend == "opencode":
             served_label = "💻 本地 OpenCode"
         else:
-            served_label = "⚡ Antigravity"
+            served_label = "🚀 Antigravity CLI"
         token_str = ""
         if turn_usage and turn_usage.get("total_tokens"):
             tokens = turn_usage["total_tokens"]
@@ -554,33 +612,47 @@ async def process_agent_turn(
 
         # Enrich execution trace with actual thinking process if thinking occurred
         target_cid = new_conv_id or get_user_conversation(uid)
+        th_card = None
         if target_cid:
             th_card = extract_last_thinking(target_cid)
-            if th_card:
-                clean_th = re.sub(r'```[\s\S]*?```', '', th_card).strip()
-                # Status card fits up to ~1500 chars comfortably within Telegram's 4096 limit
-                if len(clean_th) > 1500:
-                    clean_th = clean_th[:1490] + "..."
-                
-                thinking_injected = False
-                for idx, it in enumerate(final_items):
-                    if "🧠" in it or "思考" in it or "步驟規劃" in it:
-                        if not thinking_injected:
-                            dur_match = re.search(r'\(\d+\.?\d*s\)', it)
-                            dur_suffix = f" {dur_match.group(0)}" if dur_match else ""
-                            final_items[idx] = f"✓ 🧠 思考過程{dur_suffix}：\n{clean_th}"
-                            thinking_injected = True
-                        else:
-                            final_items[idx] = ""
-                final_items = [item for item in final_items if item]
-                if not thinking_injected:
-                    final_items.insert(0, f"✓ 🧠 思考過程：\n{clean_th}")
-            else:
-                for idx, it in enumerate(final_items):
-                    if "深度思考完成" in it:
+        if not th_card:
+            try:
+                from opencode_runner import get_user_oc_thinking
+                th_card = get_user_oc_thinking(uid)
+            except Exception:
+                pass
+        if not th_card:
+            try:
+                from ide_runner import get_user_ide_thinking
+                th_card = get_user_ide_thinking(uid)
+            except Exception:
+                pass
+
+        if th_card:
+            clean_th = re.sub(r'```[\s\S]*?```', '', th_card).strip()
+            # Status card fits up to ~1500 chars comfortably within Telegram's 4096 limit
+            if len(clean_th) > 1500:
+                clean_th = clean_th[:1490] + "..."
+
+            thinking_injected = False
+            for idx, it in enumerate(final_items):
+                if "🧠" in it or "思考" in it or "步驟規劃" in it:
+                    if not thinking_injected:
                         dur_match = re.search(r'\(\d+\.?\d*s\)', it)
                         dur_suffix = f" {dur_match.group(0)}" if dur_match else ""
-                        final_items[idx] = f"✓ 📋 步驟規劃完成{dur_suffix}"
+                        final_items[idx] = f"✓ 🧠 思考過程{dur_suffix}：\n{clean_th}"
+                        thinking_injected = True
+                    else:
+                        final_items[idx] = ""
+            final_items = [item for item in final_items if item]
+            if not thinking_injected:
+                final_items.insert(0, f"✓ 🧠 思考過程：\n{clean_th}")
+        else:
+            for idx, it in enumerate(final_items):
+                if "深度思考完成" in it:
+                    dur_match = re.search(r'\(\d+\.?\d*s\)', it)
+                    dur_suffix = f" {dur_match.group(0)}" if dur_match else ""
+                    final_items[idx] = f"✓ 📋 步驟規劃完成{dur_suffix}"
 
         if final_items:
             completed_block = "\n".join(final_items)
@@ -1054,6 +1126,54 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     args = context.args
+    backend = get_user_backend(uid)
+
+    if backend == "ide":
+        from ide_cdp import ide_controller
+        online = await is_ide_cdp_online(ide_controller.host, ide_controller.port)
+        if not online:
+            await update.message.reply_text(
+                f"❌ **無法連線至 Antigravity IDE (埠 {ide_controller.port})**\n\n"
+                f"請確認 Antigravity IDE 已帶有 `--remote-debugging-port={ide_controller.port}` 啟動。\n"
+                f"若需使用命令列或本地模型，請使用 `/backend` 切換後端。",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        if args:
+            raw_model = " ".join(args).strip()
+            switched = await ide_controller.select_model(raw_model)
+            if switched:
+                await send_formatted_reply(
+                    update=update,
+                    context=context,
+                    text=f"✅ **Antigravity IDE 模型已成功切換為：** `{switched}`\n（已即時同步至 IDE 介面）",
+                    reply_to_message_id=update.message.message_id,
+                )
+            else:
+                avail = await ide_controller.list_available_models()
+                avail_str = "\n".join([f"• `{m}`" for m in avail])
+                await send_formatted_reply(
+                    update=update,
+                    context=context,
+                    text=f"❌ 未找到匹配的模型 `{raw_model}`。\n\n**IDE 可用模型清單：**\n{avail_str}",
+                    reply_to_message_id=update.message.message_id,
+                )
+            return
+
+        avail = await ide_controller.list_available_models()
+        active = await ide_controller.get_active_model()
+        kb = build_ide_model_keyboard(avail, active)
+        await update.message.reply_text(
+            f"🧠 **Antigravity IDE AI 模型選擇器**\n\n"
+            f"📌 **目前 IDE 啟用模型**：`{active}`\n"
+            f"🔌 **後端**：⚡ Antigravity IDE (CDP 埠 {ide_controller.port})\n\n"
+            f"點擊下方按鈕可立即切換 IDE 介面上的運算模型：",
+            reply_markup=kb,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
     current_model = get_user_model(uid)
 
     if args:
@@ -1089,13 +1209,31 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reset_user_conversation(uid)
     reset_user_oc_session(uid)
     clear_transcript(uid)
+    try:
+        from opencode_runner import set_user_oc_thinking
+        set_user_oc_thinking(uid, None)
+    except Exception:
+        pass
     _user_corrections[uid] = []
     _user_merged_upto[uid] = 0
     _user_original_prompts.pop(uid, None)
+
+    try:
+        from ide_runner import clear_pending_question
+        clear_pending_question(uid)
+    except Exception:
+        pass
+
+    if get_user_backend(uid) == "ide":
+        try:
+            await ide_controller.new_chat()
+        except Exception as ie:
+            logger.debug("Failed opening new chat in IDE: %s", ie)
+
     await send_formatted_reply(
         update=update,
         context=context,
-        text="🔄 **對話記憶已重置**（Antigravity + OpenCode 會話皆已清空）\n下次傳送訊息將會開啟全新的會話。",
+        text="🔄 **對話記憶已重置**（Antigravity IDE / CLI / OpenCode 會話皆已重置）\n下次傳送訊息將會開啟全新的會話。",
         reply_to_message_id=update.message.message_id,
     )
 
@@ -1216,6 +1354,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     is_running = is_user_task_running(uid)
     uptime_str = get_uptime_string()
     usage_summary = get_user_usage_summary(uid)
+    active_backend = get_user_backend(uid)
+    ide_online = await is_ide_cdp_online(IDE_CDP_HOST, IDE_CDP_PORT)
+    if active_backend == "ide":
+        try:
+            from ide_cdp import ide_controller
+            ide_m = await ide_controller.get_active_model()
+            if ide_m:
+                current_model = ide_m
+        except Exception:
+            pass
 
     card = format_status_card(
         user_id=uid,
@@ -1229,6 +1377,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         usage_stats=usage_summary,
         oc_session_id=oc_session_id,
         oc_model=oc_model,
+        active_backend=active_backend,
+        ide_port=IDE_CDP_PORT,
+        ide_online=ide_online,
     )
     await send_formatted_reply(
         update=update,
@@ -1326,6 +1477,141 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update=update,
         context=context,
         text=f"🧹 已清理 {count} 個暫存多模態檔案。",
+        reply_to_message_id=update.message.message_id,
+    )
+
+
+async def cmd_backend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /backend or /app command to switch agent dispatch backend."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    args = context.args or []
+    if args:
+        target = args[0].strip().lower()
+        if target in ("ide", "antigravity-ide", "gui"):
+            set_user_backend(uid, "ide")
+            await send_formatted_reply(
+                update=update,
+                context=context,
+                text="✅ 已切換後端為：**⚡ Antigravity IDE (CDP 遙控)**\n"
+                     "發送文字或檔案將直接注入 Antigravity IDE 視窗執行。",
+                reply_to_message_id=update.message.message_id,
+            )
+            return
+        elif target in ("agy", "cli", "terminal"):
+            set_user_backend(uid, "agy")
+            await send_formatted_reply(
+                update=update,
+                context=context,
+                text="✅ 已切換後端為：**🚀 Antigravity CLI (agy)**\n"
+                     "使用命令列進程執行任務與工具。",
+                reply_to_message_id=update.message.message_id,
+            )
+            return
+        elif target in ("oc", "opencode", "local"):
+            set_user_backend(uid, "opencode")
+            await send_formatted_reply(
+                update=update,
+                context=context,
+                text="✅ 已切換後端為：**💻 本地 OpenCode**\n"
+                     "使用本地 OpenCode 引擎調度開源模型。",
+                reply_to_message_id=update.message.message_id,
+            )
+            return
+
+    current = get_user_backend(uid)
+    kb = build_backend_keyboard(current)
+    await update.effective_message.reply_text(
+        "🔀 **選擇 Agent 執行後端**：\n\n"
+        "• **⚡ Antigravity IDE**：透過 CDP 直接遙控本機 Antigravity IDE 視窗\n"
+        "• **🚀 Antigravity CLI**：透過 agy 命令列獨立進程執行\n"
+        "• **💻 本地 OpenCode**：調用本地模型與開源生態",
+        reply_markup=kb,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /screenshot or /shot command to capture live IDE screenshot."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    # Check online
+    online = await is_ide_cdp_online(IDE_CDP_HOST, IDE_CDP_PORT)
+    if not online:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text=f"❌ **無法連線至 Antigravity IDE (埠 {IDE_CDP_PORT})**\n\n"
+                 "請先啟動 Antigravity IDE 並帶上 `--remote-debugging-port` 參數。\n"
+                 f"`open -a \"Antigravity IDE\" --args --remote-debugging-port={IDE_CDP_PORT}`",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    msg = await update.effective_message.reply_text("📸 正在擷取 Antigravity IDE 畫面…")
+    try:
+        img_bytes = await ide_controller.capture_screenshot()
+        bio = io.BytesIO(img_bytes)
+        bio.name = "screenshot.jpg"
+        bio.seek(0)
+        await update.effective_message.reply_photo(
+            photo=bio,
+            caption="📸 **Antigravity IDE 即時畫面**",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        await msg.delete()
+    except Exception as e:
+        logger.error("Screenshot capture failed: %s", e)
+        await msg.edit_text(f"❌ 擷取螢幕截圖失敗：{e}")
+
+
+async def cmd_ide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /ide command to inspect Antigravity IDE CDP status."""
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+
+    online = await is_ide_cdp_online(IDE_CDP_HOST, IDE_CDP_PORT)
+    if not online:
+        await send_formatted_reply(
+            update=update,
+            context=context,
+            text=f"🔴 **Antigravity IDE (CDP 埠 {IDE_CDP_PORT}) 未連線**\n\n"
+                 f"IDE 目前未在遠端偵錯模式下運行。\n\n"
+                 f"💡 **啟動指令 (macOS)**：\n"
+                 f"```bash\nopen -a \"Antigravity IDE\" --args --remote-debugging-port={IDE_CDP_PORT}\n```",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    target = await resolve_active_target(IDE_CDP_HOST, IDE_CDP_PORT)
+    target_title = target.get("title", "未知視窗") if target else "無可用標靶"
+    target_url = target.get("url", "") if target else ""
+
+    state = await ide_controller.get_state()
+    is_gen = state.get("is_generating", False)
+    is_load = state.get("is_loading", False)
+    has_q = bool(state.get("question"))
+
+    status_desc = "🟢 正在生成" if is_gen else ("🟡 深度思考中" if is_load else ("❓ 正在等待用戶回答" if has_q else "⚪ 空閒"))
+
+    text = (
+        f"⚡ **Antigravity IDE (CDP) 連線報告**\n\n"
+        f"• **端點位址**: `http://{IDE_CDP_HOST}:{IDE_CDP_PORT}`\n"
+        f"• **連線狀態**: 🟢 正常連線中\n"
+        f"• **當前視窗**: `{target_title}`\n"
+        f"• **視窗網址**: `{target_url[:60]}...`\n"
+        f"• **Agent 狀態**: {status_desc}\n\n"
+        f"💡 可使用 `/screenshot` 查看視窗截圖，或使用 `/backend ide` 切換以直接遙控！"
+    )
+    await send_formatted_reply(
+        update=update,
+        context=context,
+        text=text,
         reply_to_message_id=update.message.message_id,
     )
 
@@ -1523,6 +1809,67 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await query.answer("任務已結束或未在運行中", show_alert=True)
 
+    elif data.startswith("backend_set:"):
+        choice = data.split(":", 1)[1]
+        if choice == "cancel":
+            await query.message.delete()
+            return
+        set_user_backend(uid, choice)
+        labels = {
+            "ide": "⚡ Antigravity IDE (CDP 遙控)",
+            "agy": "🚀 Antigravity CLI (agy)",
+            "opencode": "💻 本地 OpenCode",
+        }
+        await query.edit_message_text(
+            f"✅ 已成功將調度後端切換為：**{labels.get(choice, choice)}**\n\n"
+            f"💡 提示：切換至 IDE 模式後，發送訊息與檔案將直接注入本機 Antigravity IDE 視窗！",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif data.startswith("ide_model_set:"):
+        model_name = data.split(":", 1)[1]
+        await query.answer(f"正在切換 IDE 模型至 {model_name}...")
+        try:
+            from ide_cdp import ide_controller
+            switched = await ide_controller.select_model(model_name)
+            avail = await ide_controller.list_available_models()
+            active = switched or (await ide_controller.get_active_model())
+            kb = build_ide_model_keyboard(avail, active)
+            await query.edit_message_text(
+                text=f"🧠 **Antigravity IDE AI 模型選擇器**\n\n"
+                     f"✅ **已成功切換模型為**：`{active}`\n"
+                     f"🔌 **後端**：⚡ Antigravity IDE (已同步至 IDE 介面)\n\n"
+                     f"點擊下方按鈕可隨時更換：",
+                reply_markup=kb,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            logger.error("Error switching IDE model via callback: %s", e)
+            await query.answer("❌ 切換 IDE 模型失敗", show_alert=True)
+
+    elif data == "ide_model_refresh":
+        await query.answer("正在重新整理 IDE 模型...")
+        try:
+            from ide_cdp import ide_controller
+            avail = await ide_controller.list_available_models()
+            active = await ide_controller.get_active_model()
+            kb = build_ide_model_keyboard(avail, active)
+            await query.edit_message_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
+
+    elif data == "ide_model_cancel":
+        await query.answer("已關閉選單")
+        await query.message.delete()
+
+    elif data.startswith("ide_ans:"):
+        choice = data.split(":", 1)[1]
+        ok = await answer_pending_question(uid, choice)
+        if ok:
+            await query.edit_message_text(f"✓ 已向 Antigravity IDE 提交回應：`{choice}`")
+        else:
+            await query.edit_message_text("⚠️ 提交回應至 IDE 失敗或該對話框已關閉。")
+
     elif data.startswith("view_mem:"):
         target = data.split(":", 1)[1]
         if target == "close":
@@ -1578,9 +1925,29 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         ])
         await edit_card(query, overview, kb)
 
+    elif data.startswith("backend_set:"):
+        choice = data.split(":", 1)[1]
+        if choice == "cancel":
+            await query.message.delete()
+            return
+        set_user_backend(uid, choice)
+        names = {
+            "ide": "⚡ Antigravity IDE (CDP 遙控)",
+            "agy": "🚀 Antigravity CLI (agy)",
+            "opencode": "💻 本地 OpenCode",
+        }
+        await query.edit_message_text(
+            f"✅ 已成功將執行後端切換為：**{names.get(choice, choice)}**\n\n"
+            "後續的對話與指令將透過此後端執行。"
+        )
 
-
-
+    elif data.startswith("ide_ans:"):
+        choice = data.split(":", 1)[1]
+        ok = await answer_pending_question(uid, choice)
+        if ok:
+            await query.edit_message_text(f"✓ 已回覆 Antigravity IDE：`{choice}`")
+        else:
+            await query.edit_message_text(f"⚠️ 已送出選擇 `{choice}`（若 IDE 未回應，請於視窗中手動操作）")
 
     elif data == "noop":
         pass
@@ -1714,6 +2081,9 @@ from workflow_commands import (
 # A None description means the command works but stays out of the menu.
 COMMAND_SPEC = [
     (["start"],                                cmd_start,     None),
+    (["app", "backend"],                       cmd_backend,   "🔀 切換調度後端 (IDE / CLI / OpenCode)"),
+    (["screenshot", "shot"],                   cmd_screenshot,"📸 遠端截取 Antigravity IDE 視窗畫面"),
+    (["ide"],                                  cmd_ide,       "⚡ 查看 Antigravity IDE CDP 連線狀態"),
     (["usage"],                                cmd_usage,     "📊 查看 Token 用量與資源消耗統計"),
     (["model", "models"],                      cmd_model,     "🧠 切換 AI 模型"),
     (["memory", "mem"],                        cmd_memory,    "🧠 查看與管理本機持久記憶 (MEMORY.md / USER.md)"),

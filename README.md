@@ -51,12 +51,18 @@
 - **陌生人自動攔截**：未授權使用者傳送訊息會立刻被安全攔截並提示其 Telegram ID，防止未授權使用與 API 額度消耗。
 - **動態綁定支援**：可透過 `agy-gateway bind <id>` 與 `agy-gateway unbind <id>` 即時管理授權名單。
 
-### 8. 💻 雙後端架構：Antigravity + 本地 OpenCode (`opencode_runner.py`)
-- **本地 OpenCode 模型接入**：透過 `opencode run --format json` 非互動模式執行本地模型，NDJSON 串流即時解析工具調用與 Token 用量，無需依賴全域 `opencode.json` 預設（避免指向失效代理）。
-- **會話無縫承接**：每個使用者嘅 OpenCode Session ID 獨立持久化（`opencode run -s <id>`），跨重啟對話上下文不丟失。
-- **自動備援 (Auto-Fallback)**：當 Antigravity 後端失敗時，自動切換本地 OpenCode 接續執行，狀態卡會標示實際服務後端（⚡ Antigravity / 💻 本地 OpenCode / 🔁 OpenCode 備援）。
-- **一鍵切換**：`/model` 選單內建 (OC) 本地模型分區，點擊即切換後端。
-- **跨後端記憶連續 (Context Handoff)**：切換模型/後端**唔會再清空會話**——兩邊 native session 各自保留，切返轉頭可無縫恢復；Bot 內部維護滾動對話紀錄（rolling transcript），切換後自動把對方後端嘅近期對話注入新後端，因用量耗盡而切換模型都唔會再丟失記憶。
+### 8. 🔀 三後端無縫調度：Antigravity IDE (CDP 遙控) + agy CLI + 本地 OpenCode
+- **⚡ Antigravity IDE 遠端直連（參考 `antigravity-telegram-suite` 協議）**：
+  - 透過 Chrome DevTools Protocol (CDP) WebSocket 直接與本機 Antigravity IDE Electron 視窗通訊。
+  - 啟動 IDE 時加入 `--remote-debugging-port=9334`（macOS: `open -a "Antigravity IDE" --args --remote-debugging-port=9334`），即可在手機 Telegram 隨時直接操控 IDE 進行對話與執行！
+  - 📸 **遠端截圖 (`/screenshot` 或 `/shot`)**：呼叫 CDP `Page.captureScreenshot`，即時將 IDE 當前畫面截取為高清 JPEG 照片發送回 Telegram。
+  - ❓ **互動問答即時轉發**：當 IDE 內的 Agent 觸發 `ask_question` 或需確認的選項時，自動解析並轉發為 Telegram 行內按鈕（Inline Keyboard），點擊即可回傳 IDE 繼續執行。
+  - ⚡ **Auto-Accept 自動確認**：自動監聽 DOM 點擊 Run / Accept / Allow 等授權按鈕，無縫放行代碼執行。
+  - 🔄 **雙通道回覆保障**：優先解析 IDE 視窗 DOM 內容，並備援比對本地 `~/.gemini/antigravity-ide/brain/<uuid>/.system_generated/logs/transcript.jsonl`，100% 還原模型輸出。
+- **🚀 Antigravity CLI 模式 (`agent_runner.py`)**：以獨立 `agy` 命令列背景進程執行，具備會話上下文持久化與流式輸出。
+- **💻 本地 OpenCode 模型接入 (`opencode_runner.py`)**：透過 `opencode run --format json` 非互動模式執行本地模型，NDJSON 串流即時解析工具調用與 Token 用量。
+- **🔀 一鍵切換後端**：輸入 `/app` 或 `/backend` 即可彈出互動選單，在 ⚡ IDE、🚀 CLI、💻 OpenCode 之間任意切換；狀態卡 (`/status`) 亦會清晰標註當前使用的後端與連線狀態。
+- **跨後端記憶連續 (Context Handoff)**：切換模型/後端**不會清空會話**——兩邊 native session 各自保留，切換後自動把對方後端的近期對話注入新後端，無縫銜接。
 
 ### 9. 📝 執行中即時修正整合 (Mid-Run Correction Steering)
 - **修正即時生效**：任務運行途中直接傳送文字訊息，Bot 會**立即中止目前執行**，並把「原始任務 + 所有修正」合併重新執行——唔使等第一次跑完。

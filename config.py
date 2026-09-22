@@ -12,6 +12,13 @@ from dotenv import load_dotenv
 # Load .env from current directory or parent
 load_dotenv()
 
+# Clean up NO_PROXY / no_proxy if it contains raw IPv6 notation like ::1 which breaks httpx's URL parser
+for _k in ("NO_PROXY", "no_proxy"):
+    _v = os.environ.get(_k)
+    if _v and "::" in _v:
+        _cleaned = ",".join(_it.strip() for _it in _v.split(",") if "::" not in _it)
+        os.environ[_k] = _cleaned
+
 # ---------------------------------------------------------------------------
 # Telegram Settings
 # ---------------------------------------------------------------------------
@@ -75,6 +82,16 @@ if _protocol_file:
         AGENT_SYSTEM_PROMPT = "\n\n".join(p for p in (AGENT_SYSTEM_PROMPT, _protocol) if p)
     except OSError as _e:
         print(f"[config] AGENT_PROTOCOL_FILE unreadable ({_e}) — protocol NOT loaded", file=sys.stderr)
+
+# ---------------------------------------------------------------------------
+# Antigravity IDE (CDP Remote Control) Settings
+# ---------------------------------------------------------------------------
+IDE_CDP_HOST: str = os.getenv("IDE_CDP_HOST", "127.0.0.1").strip()
+IDE_CDP_PORT: int = int(os.getenv("IDE_CDP_PORT", "9334").strip() or 9334)
+IDE_AUTO_ACCEPT: bool = os.getenv("IDE_AUTO_ACCEPT", "true").lower() in ("true", "1", "yes")
+DEFAULT_BACKEND: str = os.getenv("DEFAULT_BACKEND", os.getenv("ANTIGRAVITY_BACKEND", "agy")).strip().lower()
+if DEFAULT_BACKEND not in ("ide", "agy", "opencode"):
+    DEFAULT_BACKEND = "agy"
 
 # ---------------------------------------------------------------------------
 # Local OpenCode Fallback Settings

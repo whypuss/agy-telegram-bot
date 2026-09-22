@@ -25,6 +25,9 @@ user_conversations: Dict[int, str] = {}
 # User ID -> Selected Model
 user_models: Dict[int, str] = {}
 
+# User ID -> Active Backend ('ide' | 'agy' | 'opencode')
+user_backends: Dict[int, str] = {}
+
 # User ID -> Active OpenCode Session ID (separate from agy conversations)
 user_oc_sessions: Dict[int, str] = {}
 
@@ -58,7 +61,7 @@ _BACKEND_LABELS = {"agy": "Antigravity", "opencode": "本地 OpenCode"}
 def load_state() -> None:
     """Load session state from disk on startup."""
     global user_conversations, user_models, user_session_usage, user_last_turn_usage, user_lifetime_usage
-    global user_oc_sessions, user_oc_models, user_transcripts, user_agy_cumulative
+    global user_oc_sessions, user_oc_models, user_transcripts, user_agy_cumulative, user_backends
     with _state_lock:
         if not STATE_FILE.exists():
             logger.info("No existing state file found at %s. Initializing fresh state.", STATE_FILE)
@@ -82,6 +85,8 @@ def load_state() -> None:
             user_conversations.update(_int_dict(data.get("conversations", {})))
             user_models.clear()
             user_models.update(_int_dict(data.get("models", {})))
+            user_backends.clear()
+            user_backends.update(_int_dict(data.get("backends", {})))
             user_oc_sessions.clear()
             user_oc_sessions.update(_int_dict(data.get("oc_sessions", {})))
             user_oc_models.clear()
@@ -113,6 +118,7 @@ def save_state() -> None:
         data = {
             "conversations": {str(k): v for k, v in user_conversations.items()},
             "models": {str(k): v for k, v in user_models.items()},
+            "backends": {str(k): v for k, v in user_backends.items()},
             "oc_sessions": {str(k): v for k, v in user_oc_sessions.items()},
             "oc_models": {str(k): v for k, v in user_oc_models.items()},
             "session_usage": {str(k): v for k, v in user_session_usage.items()},
@@ -136,6 +142,22 @@ def save_state() -> None:
 # ---------------------------------------------------------------------------
 # State Query & Modification Helpers
 # ---------------------------------------------------------------------------
+
+def get_user_backend(user_id: int) -> str:
+    """Get the current active backend for a user ('ide', 'agy', or 'opencode')."""
+    if user_id in user_backends:
+        return user_backends[user_id]
+    from config import is_opencode_model, DEFAULT_BACKEND
+    if is_opencode_model(get_user_model(user_id)):
+        return "opencode"
+    return DEFAULT_BACKEND
+
+
+def set_user_backend(user_id: int, backend: str) -> None:
+    """Set the active backend for a user ('ide', 'agy', or 'opencode')."""
+    if backend in ("ide", "agy", "opencode"):
+        user_backends[user_id] = backend
+        save_state()
 
 def get_user_model(user_id: int) -> str:
     """Get the current model for a user, or default."""
@@ -255,10 +277,6 @@ def get_user_usage_summary(user_id: int) -> dict:
     }
 
 
-def get_user_backend(user_id: int) -> str:
-    """Return 'opencode' if the user's current model is an OpenCode model, else 'agy'."""
-    from config import is_opencode_model
-    return "opencode" if is_opencode_model(get_user_model(user_id)) else "agy"
 
 
 def get_user_oc_model(user_id: int) -> str:
