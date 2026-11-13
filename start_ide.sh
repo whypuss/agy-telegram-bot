@@ -1,1 +1,0 @@
-scripts/start_ide_cdp.sh
