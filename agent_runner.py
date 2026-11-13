@@ -579,6 +579,24 @@ def _extract_emergency_summary_from_disk(user_id: int, conv_id: Optional[str]) -
 # ---------------------------------------------------------------------------
 # Core Execution Engine
 # ---------------------------------------------------------------------------
+_AGY_MIN_INTERVAL_SECONDS = 2.0
+_agy_rate_lock: Optional[asyncio.Lock] = None
+_last_agy_call_ts: float = 0.0
+
+
+async def _throttle_agy_call() -> None:
+    """Enforce a minimum interval between consecutive agy CLI invocations."""
+    global _agy_rate_lock, _last_agy_call_ts
+    if _agy_rate_lock is None:
+        _agy_rate_lock = asyncio.Lock()
+    async with _agy_rate_lock:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        elapsed = now - _last_agy_call_ts
+        if elapsed < _AGY_MIN_INTERVAL_SECONDS:
+            await asyncio.sleep(_AGY_MIN_INTERVAL_SECONDS - elapsed)
+        _last_agy_call_ts = loop.time()
+
 
 async def _run_agy_turn(
     prompt: str,
@@ -592,6 +610,7 @@ async def _run_agy_turn(
     Returns:
         (response_text, new_conversation_id, turn_usage)
     """
+    await _throttle_agy_call()
     model = get_user_model(user_id)
     # Guard: never pass an OpenCode model id to the agy CLI (can happen when
     # compacting an agy session while the user's active model is OpenCode).
@@ -1042,6 +1061,7 @@ async def run_agent_turn(
     Returns:
         (response_text, new_conversation_id, turn_usage)
     """
+    await _throttle_agy_call()
     model = get_user_model(user_id)
 
     if is_opencode_model(model):

@@ -364,6 +364,10 @@ async def execute_learn_turn(
 # ---------------------------------------------------------------------------
 # Continuous Background Auto-Learner with LLM Reviewer
 # ---------------------------------------------------------------------------
+_REVIEWER_COOLDOWN_SECONDS = 300.0
+_last_reviewer_run: dict[int, float] = {}
+
+
 async def run_background_reviewer(
     user_id: int,
     prompt: str,
@@ -374,6 +378,14 @@ async def run_background_reviewer(
     Run an asynchronous background reviewer turn to synthesize hardline policies
     from user corrections without blocking the user's conversation flow.
     """
+    import time
+    now = time.monotonic()
+    last_ts = _last_reviewer_run.get(user_id, 0.0)
+    if now - last_ts < _REVIEWER_COOLDOWN_SECONDS:
+        logger.debug("Skipping background reviewer for user %s (cooldown active)", user_id)
+        return {"learned": False}
+    _last_reviewer_run[user_id] = now
+
     from agent_runner import _run_agy_turn
     from config import is_opencode_model
     from session_store import get_user_model
