@@ -21,21 +21,26 @@ from config import (
 # ---------------------------------------------------------------------------
 
 AVAILABLE_MODELS: List[dict] = [
+    # Gemini 4 Series (Argon & Hydrogen)
+    {"id": "Gemini 4 Hydrogen (XHigh)", "name": "Gemini 4 Hydrogen (XHigh)", "desc": "極限思考預算，最高推理"},
+    {"id": "Gemini 4 Hydrogen (High)", "name": "Gemini 4 Hydrogen (High)", "desc": "高思考預算，深度推理"},
+    {"id": "Gemini 4 Hydrogen (Medium)", "name": "Gemini 4 Hydrogen (Med)", "desc": "平衡思考預算"},
+    {"id": "Gemini 4 Hydrogen (Low)", "name": "Gemini 4 Hydrogen (Low)", "desc": "低思考預算，極速回覆"},
+    {"id": "Gemini 4 Argon (High)", "name": "Gemini 4 Argon (High)", "desc": "Argon 高思考預算"},
+    {"id": "Gemini 4 Argon (Medium)", "name": "Gemini 4 Argon (Med)", "desc": "Argon 平衡思考預算"},
+    {"id": "Gemini 4 Argon (Low)", "name": "Gemini 4 Argon (Low)", "desc": "Argon 低思考預算"},
+    {"id": "Orchestrator (Argon)", "name": "Orchestrator (Argon)", "desc": "Argon 編排器"},
     # Gemini 3.8 Series
     {"id": "Gemini 3.8 Flash (High)", "name": "Gemini 3.8 Flash (High)", "desc": "高思考預算，深度推理"},
     {"id": "Gemini 3.8 Flash (Medium)", "name": "Gemini 3.8 Flash (Med)", "desc": "平衡思考預算 (預設)"},
     {"id": "Gemini 3.8 Flash (Low)", "name": "Gemini 3.8 Flash (Low)", "desc": "低思考預算，極速回覆"},
-    # Gemini 3.7 Series
-    {"id": "Gemini 3.7 Flash (High)", "name": "Gemini 3.7 Flash (High)", "desc": "高思考預算，深度推理"},
-    {"id": "Gemini 3.7 Flash (Medium)", "name": "Gemini 3.7 Flash (Med)", "desc": "平衡思考預算"},
-    {"id": "Gemini 3.7 Flash (Low)", "name": "Gemini 3.7 Flash (Low)", "desc": "低思考預算，極速回覆"},
-    # Gemini 3.6 / 3.5 / 3.1 Series
-    {"id": "Gemini 3.6 Flash (High)", "name": "Gemini 3.6 Flash (High)", "desc": "3.6 Flash 高思考"},
-    {"id": "Gemini 3.5 Flash (High)", "name": "Gemini 3.5 Flash (High)", "desc": "3.5 Flash 高思考"},
-    {"id": "Gemini 3.1 Pro (High)", "name": "Gemini 3.1 Pro (High)", "desc": "高智慧程式碼與長文本分析"},
-    # Claude & Other Series
-    {"id": "Claude Sonnet 4.6 (Thinking)", "name": "Claude Sonnet 4.6 (Thinking)", "desc": "強大程式能力與思考鏈"},
-    {"id": "Claude Opus 4.6 (Thinking)", "name": "Claude Opus 4.6 (Thinking)", "desc": "最強架構設計與極限推理"},
+    # Claude 5.5 & Other Series
+    {"id": "Claude Opus 5.5 (High)", "name": "Claude Opus 5.5 (High)", "desc": "最強架構設計與極限推理"},
+    {"id": "Claude Opus 5.5 (Medium)", "name": "Claude Opus 5.5 (Med)", "desc": "Opus 5.5 平衡推理"},
+    {"id": "Claude Opus 5.5 (Low)", "name": "Claude Opus 5.5 (Low)", "desc": "Opus 5.5 快速推理"},
+    {"id": "Claude Sonnet 5.5 (High)", "name": "Claude Sonnet 5.5 (High)", "desc": "強大程式能力與思考鏈"},
+    {"id": "Claude Sonnet 5.5 (Medium)", "name": "Claude Sonnet 5.5 (Med)", "desc": "Sonnet 5.5 平衡推理"},
+    {"id": "Claude Sonnet 5.5 (Low)", "name": "Claude Sonnet 5.5 (Low)", "desc": "Sonnet 5.5 快速推理"},
     {"id": "GPT-OSS 120B (Medium)", "name": "GPT-OSS 120B (Med)", "desc": "開放權重大型開源模型"},
 ]
 
