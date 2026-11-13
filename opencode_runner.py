@@ -129,6 +129,22 @@ def _parse_tool_to_indicator(tool_name: str, active: bool) -> str:
 # Core Execution Engine
 # ---------------------------------------------------------------------------
 
+def _is_context_length_error(text: str) -> bool:
+    """Return True only if the error explicitly indicates context length/window overflow."""
+    t = text.lower()
+    return any(k in t for k in (
+        "context length",
+        "context window",
+        "maximum context",
+        "context_length_exceeded",
+        "prompt is too long",
+        "too many tokens",
+        "maximum prompt length",
+        "exceeds the maximum context",
+        "exceeds context",
+    ))
+
+
 async def run_opencode_turn(
     prompt: str,
     user_id: int,
@@ -392,9 +408,14 @@ async def run_opencode_turn(
         lifetime["output_tokens"] += out_tokens
         lifetime["thinking_tokens"] += reasoning_tokens
 
-    if new_session_id:
-        set_user_oc_session(user_id, new_session_id)
-    save_state()
+    # Smart context warning when session token total approaches light model limits
+    prev_total = user_session_usage.get(user_id, {}).get("total_tokens", 0)
+    if prev_total >= 45000 and response_text and not response_text.startswith("❌"):
+        if "compact" not in response_text[-120:].lower():
+            response_text += (
+                f"\n\n💡 **提示**：目前會話累積 Token 已達 {prev_total:,}，"
+                "接近部分輕量模型上下文上限，建議輸入 `/compact` 壓縮記憶以保持流暢執行。"
+            )
 
     if not response_text:
         detail = "; ".join(error_events) or "\n".join(stderr_lines[-5:])
@@ -402,6 +423,23 @@ async def run_opencode_turn(
             # One automatic retry for transient provider errors (rate limit,
             # quota hiccups) — but never after a deliberate cancellation.
             if not _retried and user_id not in _oc_cancelled_users:
+                # If context length exceeded, automatically reset session and retry with fresh condensed prompt
+                is_ctx_err = _is_context_length_error(detail)
+                if is_ctx_err and session_id:
+                    logger.warning("OpenCode hit context overflow for user %s; auto-resetting session and retrying with handoff", user_id)
+                    reset_user_oc_session(user_id)
+                    if on_progress:
+                        try:
+                            await on_progress("⚠️ 會話超出模型上下文上限，正在自動重置會話並重試...")
+                        except Exception:
+                            pass
+                    return await run_opencode_turn(
+                        prompt=prompt,
+                        user_id=user_id,
+                        model=model,
+                        on_progress=on_progress,
+                        _retried=True,
+                    )
                 logger.warning(
                     "opencode exited %s for user %s with no output (detail: %s); retrying once",
                     proc.returncode, user_id, (detail.strip() or "<none>")[:300],
@@ -425,10 +463,16 @@ async def run_opencode_turn(
             lines = [f"❌ **OpenCode 執行失敗 (Exit Code: {proc.returncode})**"]
             if detail.strip():
                 lines.append(f"\n🔍 **錯誤詳情：**\n```\n{detail.strip()[:800]}\n```")
-                if any(k in detail.lower() for k in ("invalid", "context", "length", "too long", "token")):
+                if _is_context_length_error(detail):
                     lines.append(
-                        "\n💡 可能係會話上下文超出該模型嘅上下文上限，"
-                        "建議 /model 切換大上下文模型後再試。"
+                        "\n💡 檢測到會話上下文超出該模型上限，"
+                        "建議使用 /compact 壓縮會話或使用 /model 切換大上下文模型後再試。"
+                    )
+                    )
+                elif any(k in detail.lower() for k in ("invalid credential", "unauthorized", "auth", "api key", "forbidden", "401", "403")):
+                    lines.append(
+                        "\n💡 上游模型服務商認證失敗或憑證無效，"
+                        "建議使用 /model 切換至其他可用模型（如 SenseNova 或 Antigravity 模型）。"
                     )
             else:
                 lines.append(
@@ -439,7 +483,11 @@ async def run_opencode_turn(
         else:
             response_text = "（OpenCode 回覆為空）"
 
+    # Only persist session if the turn completed successfully
     if response_text and not response_text.startswith("❌"):
+        if new_session_id:
+            set_user_oc_session(user_id, new_session_id)
+        save_state()
         try:
             asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
             from learner import auto_learn_from_turn
@@ -449,5 +497,10 @@ async def run_opencode_turn(
         # Record into the rolling cross-backend transcript for handoff
         append_transcript(user_id, "user", "opencode", prompt)
         append_transcript(user_id, "assistant", "opencode", response_text)
+    else:
+        # If this turn failed and we were supposed to be on a fresh session, keep it clean
+        if not session_id:
+            reset_user_oc_session(user_id)
+        save_state()
 
     return response_text, new_session_id, turn_usage

@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import signal
 import time
@@ -579,13 +580,69 @@ def _extract_emergency_summary_from_disk(user_id: int, conv_id: Optional[str]) -
 # ---------------------------------------------------------------------------
 # Core Execution Engine
 # ---------------------------------------------------------------------------
-_AGY_MIN_INTERVAL_SECONDS = 2.0
+_AGY_MIN_INTERVAL_SECONDS = float(os.getenv("AGY_MIN_INTERVAL_SECONDS", "2.5"))
+_AGY_COOLDOWN_BASE_SECONDS = 30.0
+_AGY_COOLDOWN_MAX_SECONDS = 300.0
 _agy_rate_lock: Optional[asyncio.Lock] = None
 _last_agy_call_ts: float = 0.0
+_agy_cooldown_until: float = 0.0
+_agy_consecutive_rate_limits: int = 0
+
+
+def _is_rate_limit_error(text: str) -> bool:
+    """Return True if the error text indicates API rate limiting or quota/capacity exhaustion."""
+    if not text:
+        return False
+    t = text.lower()
+    return any(k in t for k in (
+        "429",
+        "resource_exhausted",
+        "resource exhausted",
+        "rate limit",
+        "ratelimit",
+        "too many requests",
+        "quota exceeded",
+        "quota_exceeded",
+        "high demand",
+        "model_capacity_exhausted",
+        "overloaded",
+    ))
+
+
+def get_agy_cooldown_remaining() -> float:
+    """Return remaining seconds in the adaptive agy rate-limit cooldown, or 0.0."""
+    rem = _agy_cooldown_until - time.monotonic()
+    return rem if rem > 0.0 else 0.0
+
+
+def _record_agy_rate_limit() -> float:
+    """Trigger exponential backoff cooldown after a 429/rate-limit error; return cooldown seconds."""
+    global _agy_cooldown_until, _agy_consecutive_rate_limits
+    _agy_consecutive_rate_limits += 1
+    backoff = min(
+        _AGY_COOLDOWN_MAX_SECONDS,
+        _AGY_COOLDOWN_BASE_SECONDS * (2 ** (_agy_consecutive_rate_limits - 1)),
+    )
+    jitter = random.uniform(1.0, 5.0)
+    duration = backoff + jitter
+    _agy_cooldown_until = time.monotonic() + duration
+    logger.warning(
+        "agy rate-limit circuit breaker triggered (#%d): cooling down for %.1fs",
+        _agy_consecutive_rate_limits,
+        duration,
+    )
+    return duration
+
+
+def _reset_agy_rate_limit() -> None:
+    """Clear rate-limit streak after a successful agy turn."""
+    global _agy_cooldown_until, _agy_consecutive_rate_limits
+    _agy_consecutive_rate_limits = 0
+    _agy_cooldown_until = 0.0
 
 
 async def _throttle_agy_call() -> None:
-    """Enforce a minimum interval between consecutive agy CLI invocations."""
+    """Enforce a minimum interval with jitter between consecutive agy CLI invocations."""
     global _agy_rate_lock, _last_agy_call_ts
     if _agy_rate_lock is None:
         _agy_rate_lock = asyncio.Lock()
@@ -593,8 +650,9 @@ async def _throttle_agy_call() -> None:
         loop = asyncio.get_running_loop()
         now = loop.time()
         elapsed = now - _last_agy_call_ts
-        if elapsed < _AGY_MIN_INTERVAL_SECONDS:
-            await asyncio.sleep(_AGY_MIN_INTERVAL_SECONDS - elapsed)
+        min_gap = _AGY_MIN_INTERVAL_SECONDS + random.uniform(0.2, 0.8)
+        if elapsed < min_gap:
+            await asyncio.sleep(min_gap - elapsed)
         _last_agy_call_ts = loop.time()
 
 
@@ -610,6 +668,24 @@ async def _run_agy_turn(
     Returns:
         (response_text, new_conversation_id, turn_usage)
     """
+    cooldown_rem = get_agy_cooldown_remaining()
+    if cooldown_rem > 15.0:
+        logger.warning("Skipping agy turn: rate-limit cooldown active (%.1fs remaining)", cooldown_rem)
+        return (
+            f"⏳ **Antigravity API 處於風控冷卻中（剩餘約 {int(cooldown_rem)} 秒）**\n"
+            "為避免連續觸發 429 限流風控，系統已暫停請求。\n"
+            "💡 請稍候再試，或使用 `/model` 切換至本地 OpenCode 模型繼續。",
+            None,
+            None,
+        )
+    if cooldown_rem > 0.0:
+        if on_progress:
+            try:
+                await on_progress(f"⏳ 風控冷卻中，等待 {int(cooldown_rem) + 1} 秒後執行...")
+            except Exception:
+                pass
+        await asyncio.sleep(cooldown_rem)
+
     await _throttle_agy_call()
     model = get_user_model(user_id)
     # Guard: never pass an OpenCode model id to the agy CLI (can happen when
@@ -999,7 +1075,16 @@ async def _run_agy_turn(
             in_tok = sess.get("input_tokens", 0)
             turns = sess.get("num_turns", 0)
             
-            if "timeout" in err_detail.lower():
+            if _is_rate_limit_error(err_detail):
+                cooldown_secs = _record_agy_rate_limit()
+                err_lines = [
+                    "⏳ **觸發 API 頻率限制 / 額度風控 (429 / RESOURCE_EXHAUSTED)**",
+                    f"• 系統已自動啟動指數退避冷卻：**{int(cooldown_secs)} 秒**，期間將暫緩 Antigravity 請求以保護帳號。",
+                    "\n💡 **建議解法：**",
+                    "1. 稍候片刻再發送指令",
+                    "2. 使用 `/model` 切換至其他模型或本地 OpenCode 免費模型繼續工作",
+                ]
+            elif "timeout" in err_detail.lower():
                 err_lines.append(
                     f"\n⏰ **執行超時 (Timeout: {AGY_TIMEOUT}s)**\n"
                     f"• 任務執行耗時達到上限（{AGY_TIMEOUT // 60} 分鐘），進程已被中止。\n"
@@ -1031,7 +1116,8 @@ async def _run_agy_turn(
             response_text = "（Agent 回覆為空）"
 
     # Background memory extraction and continuous auto-learning from the completed turn
-    if response_text and not response_text.startswith("❌"):
+    if response_text and not response_text.startswith(("❌", "⏳")):
+        _reset_agy_rate_limit()
         try:
             asyncio.create_task(asyncio.to_thread(monitor_and_extract, prompt, response_text))
             from learner import auto_learn_from_turn
@@ -1061,7 +1147,6 @@ async def run_agent_turn(
     Returns:
         (response_text, new_conversation_id, turn_usage)
     """
-    await _throttle_agy_call()
     model = get_user_model(user_id)
 
     if is_opencode_model(model):

@@ -46,7 +46,7 @@ else:
     AGY_PATH = shutil.which("agy") or shutil.which("gemini") or "agy"
 
 # Default Model
-DEFAULT_MODEL: str = os.getenv("AGY_MODEL", "Gemini 3.8 Flash (Medium)").strip()
+DEFAULT_MODEL: str = os.getenv("AGY_MODEL", "Gemini 4 Hydrogen (Medium)").strip()
 
 # Timeout per agent turn (in seconds, default: 3600 = 1 hour)
 AGY_TIMEOUT: int = int(os.getenv("AGY_TIMEOUT", "3600"))

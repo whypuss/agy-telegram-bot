@@ -33,7 +33,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import BadRequest, NetworkError, TimedOut, Conflict
+from telegram.error import BadRequest, NetworkError, TimedOut, Conflict, RetryAfter
 
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -256,6 +256,18 @@ async def send_formatted_reply(
                 message_thread_id=thread_id,
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
+        except RetryAfter as e:
+            wait_s = float(getattr(e, "retry_after", 5)) + 1.0
+            logger.warning("Telegram RetryAfter in send_chunked_reply: sleeping %.1fs", wait_s)
+            await asyncio.sleep(wait_s)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=thread_id,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
         except BadRequest as e:
             # Fallback to plain text on Markdown syntax parse errors
             if "parse" in str(e).lower() or "entities" in str(e).lower():
@@ -379,6 +391,10 @@ async def process_agent_turn(
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=build_cancel_keyboard(),
             )
+        except RetryAfter as e:
+            wait_s = float(getattr(e, "retry_after", 5)) + 1.0
+            last_status_update[0] = time.time() + wait_s
+            logger.warning("Status card RetryAfter: backing off %.1fs", wait_s)
         except BadRequest as e:
             if "not modified" in str(e).lower():
                 return

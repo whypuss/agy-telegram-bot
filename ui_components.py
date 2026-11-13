@@ -52,18 +52,24 @@ PAGE_SIZE = 6
 # ---------------------------------------------------------------------------
 
 OPENCODE_MODELS: List[dict] = [
+    # 官方 OpenCode 免費模型
+    {"id": "opencode/beam-free", "name": "Beam Free", "desc": "官方免費模型"},
+    {"id": "opencode/flint-40b-free", "name": "Flint 40B Free", "desc": "官方免費 40B 大模型"},
+    {"id": "opencode/mimo-v2.6-flash-free", "name": "MiMo V2.6 Flash Free", "desc": "官方免費極速模型"},
+    {"id": "opencode/nemotron-3.5-super-vl-free", "name": "Nemotron 3.5 Super VL Free", "desc": "官方免費視覺語言大模型"},
+    {"id": "opencode/nemotron-3.5-lightning-free", "name": "Nemotron 3.5 Lightning Free", "desc": "官方免費輕量推理模型"},
+    {"id": "opencode/jev-1.13-free", "name": "Jev 1.13 Free", "desc": "官方免費模型"},
+    {"id": "opencode/deepseek-v4.1-flash-free", "name": "DeepSeek V4.1 Flash Free", "desc": "官方免費 V4.1 極速版"},
+    {"id": "opencode/glm-5.3-flash-free", "name": "GLM 5.3 Flash Free", "desc": "官方免費 GLM 5.3 極速版"},
+    # SenseNova 託管模型
     {"id": "sensenova/deepseek-v4-flash", "name": "DeepSeek V4 Flash", "desc": "極速回覆 (預設備援)"},
     {"id": "sensenova/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "較強推理"},
     {"id": "sensenova/sensenova-u1-fast", "name": "SenseNova U1 Fast", "desc": "日日新 U1 (圖文/生成)"},
     {"id": "sensenova/sensenova-u1.5-lite", "name": "SenseNova U1.5 Lite", "desc": "日日新 U1.5 輕量版"},
     {"id": "sensenova/sensenova-6.8-flash-lite", "name": "SenseNova 6.8 Flash Lite", "desc": "日日新 6.8 輕量對話"},
-    {"id": "opencode/muse-spark-1.3-contributor-free", "name": "Muse Spark 1.3", "desc": "免費額度"},
-    {"id": "opencode/muse-spark-1.2-contributor-free", "name": "Muse Spark 1.2", "desc": "免費額度"},
-    {"id": "opencode/nemotron-3-ultra-free", "name": "Nemotron 3 Ultra Free", "desc": "免費大型模型"},
-    {"id": "opencode/nemotron-3.5-lightning-free", "name": "Nemotron 3.5 Lightning Free", "desc": "免費中型模型"},
-    {"id": "opencode/mimo-v2.5-free", "name": "Mimo v2.5 Free", "desc": "Mimo 免費版"},
     {"id": "sensenova/kimi-k3", "name": "Kimi K3", "desc": "長文本對話"},
     {"id": "sensenova/glm-5.2", "name": "GLM 5.2", "desc": "通用對話"},
+    # 其他專用 / 本地模型
     {"id": "minimax-cn-coding-plan/MiniMax-M2.5", "name": "MiniMax M2.5", "desc": "Coding 方案額度"},
     {"id": "minimax-cn-coding-plan/MiniMax-M2.7", "name": "MiniMax M2.7", "desc": "Coding 方案額度"},
     {"id": "ollama/gemma4-e2b-uncensored", "name": "Gemma4 E2B (本地)", "desc": "本機 Ollama 離線"},
@@ -102,12 +108,29 @@ def resolve_model_alias(model_query: str) -> str:
         return query.strip()
 
     # OpenCode provider keywords (checked before agy aliases to avoid collisions)
+    if "beam" in q_clean:
+        return "opencode/beam-free"
+
+    if "flint" in q_clean:
+        return "opencode/flint-40b-free"
+
+    if "mimo" in q_clean:
+        return "opencode/mimo-v2.6-flash-free"
+
+    if "jev" in q_clean:
+        return "opencode/jev-1.13-free"
+
+    if "nemotron" in q_clean:
+        if "super" in q_clean or "vl" in q_clean or "ultra" in q_clean:
+            return "opencode/nemotron-3.5-super-vl-free"
+        return "opencode/nemotron-3.5-lightning-free"
+
     if "spark" in q_clean or "muse" in q_clean:
-        if "1.2" in q_clean:
-            return "opencode/muse-spark-1.2-contributor-free"
-        return "opencode/muse-spark-1.3-contributor-free"
+        return "opencode/beam-free"
 
     if "deepseek" in q_clean:
+        if "4.1" in q_clean or "v4.1" in q_clean or "free" in q_clean:
+            return "opencode/deepseek-v4.1-flash-free"
         if "pro" in q_clean or "v4 pro" in q_clean:
             return "sensenova/deepseek-v4-pro"
         return "sensenova/deepseek-v4-flash"
@@ -116,6 +139,8 @@ def resolve_model_alias(model_query: str) -> str:
         return "sensenova/kimi-k3"
 
     if "glm" in q_clean:
+        if "5.3" in q_clean or "free" in q_clean:
+            return "opencode/glm-5.3-flash-free"
         return "sensenova/glm-5.2"
 
     if "minimax" in q_clean or "m2" in q_clean:
@@ -140,7 +165,26 @@ def resolve_model_alias(model_query: str) -> str:
     if "sensenova" in q_clean and "fast" in q_clean:
         return "sensenova/deepseek-v4-flash"
 
-    # Quick aliases for model versions
+    # Quick aliases for Antigravity model versions
+    if "orchestrator" in q_clean:
+        return "Orchestrator (Argon)"
+
+    if "hydrogen" in q_clean or "gemini 4" in q_clean or q_clean.startswith("4 ") or q_clean == "4":
+        if "xhigh" in q_clean or "x-high" in q_clean:
+            return "Gemini 4 Hydrogen (XHigh)"
+        if "high" in q_clean:
+            return "Gemini 4 Hydrogen (High)"
+        if "low" in q_clean:
+            return "Gemini 4 Hydrogen (Low)"
+        return "Gemini 4 Hydrogen (Medium)"
+
+    if "argon" in q_clean:
+        if "high" in q_clean:
+            return "Gemini 4 Argon (High)"
+        if "low" in q_clean:
+            return "Gemini 4 Argon (Low)"
+        return "Gemini 4 Argon (Medium)"
+
     if "3.8" in q_clean:
         if "high" in q_clean:
             return "Gemini 3.8 Flash (High)"
@@ -149,33 +193,19 @@ def resolve_model_alias(model_query: str) -> str:
         else:
             return "Gemini 3.8 Flash (Medium)"
 
-    if "3.7" in q_clean:
-        if "med" in q_clean:
-            return "Gemini 3.7 Flash (Medium)"
-        elif "low" in q_clean:
-            return "Gemini 3.7 Flash (Low)"
-        else:
-            return "Gemini 3.7 Flash (High)"
-
-    if "3.6" in q_clean:
-        if "med" in q_clean:
-            return "Gemini 3.6 Flash (Medium)"
-        elif "low" in q_clean:
-            return "Gemini 3.6 Flash (Low)"
-        else:
-            return "Gemini 3.6 Flash (High)"
-
-    if "3.5" in q_clean:
-        return "Gemini 3.5 Flash (High)"
-
-    if "3.1" in q_clean or ("pro" in q_clean and "gemini" in q_clean):
-        return "Gemini 3.1 Pro (High)"
-
     if "opus" in q_clean:
-        return "Claude Opus 4.6 (Thinking)"
+        if "low" in q_clean:
+            return "Claude Opus 5.5 (Low)"
+        if "med" in q_clean:
+            return "Claude Opus 5.5 (Medium)"
+        return "Claude Opus 5.5 (High)"
 
     if "sonnet" in q_clean:
-        return "Claude Sonnet 4.6 (Thinking)"
+        if "high" in q_clean:
+            return "Claude Sonnet 5.5 (High)"
+        if "low" in q_clean:
+            return "Claude Sonnet 5.5 (Low)"
+        return "Claude Sonnet 5.5 (Medium)"
 
     if "oss" in q_clean or "gpt" in q_clean:
         return "GPT-OSS 120B (Medium)"

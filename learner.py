@@ -386,7 +386,7 @@ async def run_background_reviewer(
         return {"learned": False}
     _last_reviewer_run[user_id] = now
 
-    from agent_runner import _run_agy_turn
+    from agent_runner import _run_agy_turn, get_agy_cooldown_remaining
     from config import is_opencode_model
     from session_store import get_user_model
 
@@ -406,12 +406,15 @@ async def run_background_reviewer(
                 model=model,
             )
         else:
+            if get_agy_cooldown_remaining() > 0:
+                logger.info("Skipping background reviewer: agy rate-limit cooldown active")
+                return {"learned": False}
             rev_reply, _, _ = await _run_agy_turn(
                 prompt=reviewer_prompt,
                 user_id=user_id,
             )
 
-        if not rev_reply or rev_reply.startswith("❌"):
+        if not rev_reply or rev_reply.startswith(("❌", "⏳")):
             logger.warning("Background Reviewer returned empty or error reply")
             return {"learned": False}
 
