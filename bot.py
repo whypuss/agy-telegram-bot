@@ -839,6 +839,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # Handlers: Photos & Albums
 # ---------------------------------------------------------------------------
 
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle video and video_note messages by downloading to CACHE_DIR."""
+    if not update.message:
+        return
+    video = update.message.video or update.message.video_note
+    if not video:
+        return
+
+    uid = update.effective_user.id
+    if not is_authorized(uid):
+        return
+    if not is_group_trigger(update, context):
+        return
+
+    tg_file = await video.get_file()
+    ext = ".mp4"
+    if getattr(video, "file_name", None) and "." in video.file_name:
+        ext = "." + video.file_name.rsplit(".", 1)[-1].lower()
+    saved_path = CACHE_DIR / f"video_{int(time.time())}_{video.file_unique_id}{ext}"
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    await tg_file.download_to_drive(custom_path=str(saved_path))
+
+    caption = update.message.caption or ""
+    caption = clean_mention(caption, context.bot.username)
+    prompt = f"[📎 使用者傳送了視頻: {saved_path}]\n{caption}".strip()
+    await process_user_message(update, context, prompt)
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle photos and photo albums with batching."""
     if not update.message or not update.message.photo:
@@ -1722,6 +1750,7 @@ from workflow_commands import (
     cmd_browser,
     cmd_diff,
     cmd_schedule,
+    cmd_update,
 )
 
 # Single source of truth for commands: (aliases, handler, menu description).
@@ -1750,6 +1779,7 @@ COMMAND_SPEC = [
     (["browser", "browse"],                    cmd_browser,   "🌐 啟動聯網檢索與網頁內容/UI 驗證"),
     (["diff"],                                 cmd_diff,      "🔍 零 Token 即時檢視工作目錄代碼變更 (Git Diff)"),
     (["schedule"],                             cmd_schedule,  "⏱️ 設定倒數計時提醒或定時背景任務"),
+    (["update", "upgrade"],                    cmd_update,    "🚀 一鍵更新代碼與依賴並平滑重啟服務 (Hermes-style Update)"),
     (["help"],                                 cmd_help,      "📖 顯示說明手冊"),
 ]
 
@@ -1778,6 +1808,7 @@ def register_handlers(app) -> None:
 
     # Media & Message Handlers
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
