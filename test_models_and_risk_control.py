@@ -38,8 +38,13 @@ class TestModelAliases(unittest.TestCase):
         oc_ids = {m["id"] for m in OPENCODE_MODELS}
         cases = {
             "beam": "opencode/beam-free",
+            "pickle": "opencode/big-pickle",
             "flint": "opencode/flint-40b-free",
+            "iceman": "opencode/iceman-free",
+            "inkling": "opencode/inkling-2-small-free",
+            "longcat": "opencode/longcat-2.5-free",
             "mimo": "opencode/mimo-v2.6-flash-free",
+            "minimax m3.1": "opencode/minimax-m3.1-flash-free",
             "deepseek 4.1": "opencode/deepseek-v4.1-flash-free",
             "glm 5.3": "opencode/glm-5.3-flash-free",
         }

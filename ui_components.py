@@ -54,15 +54,20 @@ PAGE_SIZE = 6
 OPENCODE_MODELS: List[dict] = [
     # 官方 OpenCode 免費模型
     {"id": "opencode/beam-free", "name": "Beam Free", "desc": "官方免費模型"},
+    {"id": "opencode/big-pickle", "name": "Big Pickle", "desc": "官方免費模型"},
     {"id": "opencode/flint-40b-free", "name": "Flint 40B Free", "desc": "官方免費 40B 大模型"},
+    {"id": "opencode/iceman-free", "name": "Iceman Free", "desc": "官方免費模型"},
+    {"id": "opencode/inkling-2-small-free", "name": "Inkling 2 Small Free", "desc": "官方免費輕量模型"},
+    {"id": "opencode/longcat-2.5-free", "name": "Longcat 2.5 Free", "desc": "官方免費模型"},
     {"id": "opencode/mimo-v2.6-flash-free", "name": "MiMo V2.6 Flash Free", "desc": "官方免費極速模型"},
+    {"id": "opencode/minimax-m3.1-flash-free", "name": "MiniMax M3.1 Flash Free", "desc": "官方免費 M3.1 極速版"},
     {"id": "opencode/nemotron-3.5-super-vl-free", "name": "Nemotron 3.5 Super VL Free", "desc": "官方免費視覺語言大模型"},
     {"id": "opencode/nemotron-3.5-lightning-free", "name": "Nemotron 3.5 Lightning Free", "desc": "官方免費輕量推理模型"},
-    {"id": "opencode/jev-1.13-free", "name": "Jev 1.13 Free", "desc": "官方免費模型"},
     {"id": "opencode/deepseek-v4.1-flash-free", "name": "DeepSeek V4.1 Flash Free", "desc": "官方免費 V4.1 極速版"},
     {"id": "opencode/glm-5.3-flash-free", "name": "GLM 5.3 Flash Free", "desc": "官方免費 GLM 5.3 極速版"},
     # SenseNova 託管模型
     {"id": "sensenova/deepseek-v4-flash", "name": "DeepSeek V4 Flash", "desc": "極速回覆 (預設備援)"},
+    {"id": "sensenova/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash", "desc": "SenseNova V4.1 極速版"},
     {"id": "sensenova/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "較強推理"},
     {"id": "sensenova/sensenova-u1-fast", "name": "SenseNova U1 Fast", "desc": "日日新 U1 (圖文/生成)"},
     {"id": "sensenova/sensenova-u1.5-lite", "name": "SenseNova U1.5 Lite", "desc": "日日新 U1.5 輕量版"},
@@ -111,14 +116,23 @@ def resolve_model_alias(model_query: str) -> str:
     if "beam" in q_clean:
         return "opencode/beam-free"
 
+    if "pickle" in q_clean:
+        return "opencode/big-pickle"
+
     if "flint" in q_clean:
         return "opencode/flint-40b-free"
 
+    if "iceman" in q_clean:
+        return "opencode/iceman-free"
+
+    if "inkling" in q_clean:
+        return "opencode/inkling-2-small-free"
+
+    if "longcat" in q_clean:
+        return "opencode/longcat-2.5-free"
+
     if "mimo" in q_clean:
         return "opencode/mimo-v2.6-flash-free"
-
-    if "jev" in q_clean:
-        return "opencode/jev-1.13-free"
 
     if "nemotron" in q_clean:
         if "super" in q_clean or "vl" in q_clean or "ultra" in q_clean:
@@ -143,7 +157,9 @@ def resolve_model_alias(model_query: str) -> str:
             return "opencode/glm-5.3-flash-free"
         return "sensenova/glm-5.2"
 
-    if "minimax" in q_clean or "m2" in q_clean:
+    if "minimax" in q_clean or "m2" in q_clean or "m3" in q_clean:
+        if "3.1" in q_clean or "m3" in q_clean or "free" in q_clean:
+            return "opencode/minimax-m3.1-flash-free"
         if "2.7" in q_clean:
             return "minimax-cn-coding-plan/MiniMax-M2.7"
         return "minimax-cn-coding-plan/MiniMax-M2.5"
