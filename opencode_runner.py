@@ -468,7 +468,6 @@ async def run_opencode_turn(
                         "\n💡 檢測到會話上下文超出該模型上限，"
                         "建議使用 /compact 壓縮會話或使用 /model 切換大上下文模型後再試。"
                     )
-                    )
                 elif any(k in detail.lower() for k in ("invalid credential", "unauthorized", "auth", "api key", "forbidden", "401", "403")):
                     lines.append(
                         "\n💡 上游模型服務商認證失敗或憑證無效，"
